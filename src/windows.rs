@@ -1,5 +1,5 @@
 use crate::server::Capture;
-use crate::{KBMSEvent, MSButton, KBKey};
+use crate::{KBKey, KBMSEvent, MSButton};
 use crossbeam::queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{self, AtomicBool, AtomicIsize};
@@ -60,7 +60,14 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 fn vkcode_to_kbkey(code: u32) -> Option<KBKey> {
-	use windows::Win32::UI::Input::KeyboardAndMouse::*;
+	use windows::Win32::UI::Input::KeyboardAndMouse::{
+		VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10,
+		VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME,
+		VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_OEM_1,
+		VK_OEM_2, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
+		VK_OEM_PERIOD, VK_OEM_PLUS, VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT,
+		VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
+	};
 
 	Some(match VIRTUAL_KEY(code as _) {
 		VK_BACK => KBKey::Backspace,
@@ -90,6 +97,18 @@ fn vkcode_to_kbkey(code: u32) -> Option<KBKey> {
 		VK_RCONTROL => KBKey::RightControl,
 		VK_RMENU => KBKey::RightAlt,
 		VK_LMENU => KBKey::LeftAlt,
+		VK_F1 => KBKey::F1,
+		VK_F2 => KBKey::F2,
+		VK_F3 => KBKey::F3,
+		VK_F4 => KBKey::F4,
+		VK_F5 => KBKey::F5,
+		VK_F6 => KBKey::F6,
+		VK_F7 => KBKey::F7,
+		VK_F8 => KBKey::F8,
+		VK_F9 => KBKey::F9,
+		VK_F10 => KBKey::F10,
+		VK_F11 => KBKey::F11,
+		VK_F12 => KBKey::F12,
 		VIRTUAL_KEY(0x0030) => KBKey::Zero,
 		VIRTUAL_KEY(0x0031) => KBKey::One,
 		VIRTUAL_KEY(0x0032) => KBKey::Two,
@@ -115,12 +134,30 @@ fn vkcode_to_kbkey(code: u32) -> Option<KBKey> {
 		VK_OEM_4 => KBKey::LeftBrace,
 		VK_OEM_6 => KBKey::RightBrace,
 		VK_OEM_5 => KBKey::Backslash,
-		//VIRTUAL_KEY(0x00) => KBKey::,
-		//VIRTUAL_KEY(0x00) => KBKey::,
-		//VIRTUAL_KEY(0x00) => KBKey::,
+		VIRTUAL_KEY(0x0041) => KBKey::A,
+		VIRTUAL_KEY(0x0053) => KBKey::S,
+		VIRTUAL_KEY(0x0044) => KBKey::D,
+		VIRTUAL_KEY(0x0046) => KBKey::F,
+		VIRTUAL_KEY(0x0047) => KBKey::G,
+		VIRTUAL_KEY(0x0048) => KBKey::H,
+		VIRTUAL_KEY(0x004A) => KBKey::J,
+		VIRTUAL_KEY(0x004B) => KBKey::K,
+		VIRTUAL_KEY(0x004C) => KBKey::L,
+		VK_OEM_1 => KBKey::SemiColon,
+		VK_OEM_7 => KBKey::Apostrophe,
+		VIRTUAL_KEY(0x005A) => KBKey::Z,
+		VIRTUAL_KEY(0x0058) => KBKey::X,
+		VIRTUAL_KEY(0x0043) => KBKey::C,
+		VIRTUAL_KEY(0x0056) => KBKey::V,
+		VIRTUAL_KEY(0x0042) => KBKey::B,
+		VIRTUAL_KEY(0x004E) => KBKey::N,
+		VIRTUAL_KEY(0x004D) => KBKey::M,
+		VK_OEM_COMMA => KBKey::Comma,
+		VK_OEM_PERIOD => KBKey::Dot,
+		VK_OEM_2 => KBKey::Slash,
 		c => {
 			println!("Unknown Virtual-Key: {:#06x}", c.0);
-			return None
+			return None;
 		},
 	})
 }
@@ -135,8 +172,10 @@ unsafe extern "system" fn keyboard_ll_hook(
 		let pass_events = PASS_EVENTS.load(atomic::Ordering::SeqCst);
 
 		let event_op: Option<KBMSEvent> = match wparam.0 as u32 {
-			WM_KEYDOWN | WM_SYSKEYDOWN => vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBPress(v)),
-			WM_KEYUP | WM_SYSKEYUP => vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBRelease(v)),
+			WM_KEYDOWN | WM_SYSKEYDOWN =>
+				vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBPress(v)),
+			WM_KEYUP | WM_SYSKEYUP =>
+				vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBRelease(v)),
 			unknown => {
 				println!("Unknown WPARAM({}) for KEYBOARD_LL", unknown);
 				None
