@@ -1,6 +1,6 @@
 use crate::server::Capture;
 use crate::{KBKey, KBMSEvent, MSButton};
-use crossbeam::queue::SegQueue;
+use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{self, AtomicBool, AtomicIsize};
 use std::sync::Arc;
@@ -28,12 +28,12 @@ use windows::Win32::UI::Input::{
 	RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, GetShellWindow,
-	RegisterClassExW, SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE,
-	HCURSOR, HHOOK, HICON, HMENU, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
-	WH_MOUSE_LL, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-	WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-	WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, RegisterClassExW,
+	SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE, HCURSOR, HHOOK,
+	HICON, HMENU, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT,
+	WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+	WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+	WM_SYSKEYUP, WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE,
 	WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP, WS_VISIBLE,
 };
 
@@ -41,7 +41,10 @@ const WINPROC_CLASS_NAME: &'static U16CStr = u16cstr!("Boundless Raw Input");
 static PASS_EVENTS: AtomicBool = AtomicBool::new(true);
 static HOOK_MOUSE_LL: AtomicIsize = AtomicIsize::new(0);
 static HOOK_KEYBOARD_LL: AtomicIsize = AtomicIsize::new(0);
-static EVENT_QUEUE: SegQueue<KBMSEvent> = SegQueue::new();
+
+lazy_static! {
+	static ref EVENT_QUEUE: AtomicRingQueue<KBMSEvent> = AtomicRingQueue::with_capacity(1000);
+}
 
 unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 	if code >= 0 {
@@ -52,7 +55,7 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 			WM_RBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Right)),
 			WM_MBUTTONDOWN => Some(KBMSEvent::MSPress(MSButton::Middle)),
 			WM_MBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Middle)),
-			WM_MOUSEMOVE => None, // TODO: Maybe use this in the future???
+			WM_MOUSEMOVE => None,
 			WM_MOUSEWHEEL =>
 				Some(KBMSEvent::MSScrollV(
 					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16,
@@ -68,9 +71,8 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 		};
 
 		if !PASS_EVENTS.load(atomic::Ordering::SeqCst) {
-			if event_op.is_some() {
-				let event = event_op.unwrap();
-				EVENT_QUEUE.push(event);
+			if let Some(event) = event_op {
+				event_queue_push(event);
 			}
 
 			return LRESULT(1);
@@ -210,16 +212,16 @@ unsafe extern "system" fn keyboard_ll_hook(
 				PASS_EVENTS.store(!pass_events, atomic::Ordering::SeqCst);
 
 				if pass_events {
-					EVENT_QUEUE.push(KBMSEvent::CaptureStart);
+					event_queue_push(KBMSEvent::CaptureStart);
 				} else {
-					EVENT_QUEUE.push(KBMSEvent::CaptureEnd);
+					event_queue_push(KBMSEvent::CaptureEnd);
 				}
 
 				return LRESULT(1);
 			}
 
 			if !pass_events {
-				EVENT_QUEUE.push(event);
+				event_queue_push(event);
 				return LRESULT(1);
 			}
 		}
@@ -234,9 +236,6 @@ unsafe extern "system" fn wnd_proc_callback(
 	wparam: WPARAM,
 	lparam: LPARAM,
 ) -> LRESULT {
-	println!("Window Proc MSG: {:#04x}", msg);
-	// println!("window: {:?}, msg: {}, wparam: {:?}, lparam: {:?}", window, msg, wparam,
-	// lparam);
 	DefWindowProcW(window, msg, wparam, lparam)
 }
 
@@ -352,8 +351,6 @@ impl WindowsCapture {
 			HOOK_MOUSE_LL.store(hook_mouse_ll.0, atomic::Ordering::SeqCst);
 			HOOK_KEYBOARD_LL.store(hook_keyboard_ll.0, atomic::Ordering::SeqCst);
 
-			println!("register");
-
 			let raw_devices = [RAWINPUTDEVICE {
 				usUsagePage: HID_USAGE_PAGE_GENERIC,
 				usUsage: HID_USAGE_GENERIC_MOUSE,
@@ -409,7 +406,7 @@ impl WindowsCapture {
 											if mouse_data.usFlags as u32 | MOUSE_MOVE_RELATIVE
 												== MOUSE_MOVE_RELATIVE
 											{
-												EVENT_QUEUE.push(KBMSEvent::MSMotion(
+												event_queue_push(KBMSEvent::MSMotion(
 													mouse_data.lLastX,
 													mouse_data.lLastY,
 												));
@@ -447,7 +444,20 @@ impl WindowsCapture {
 }
 
 impl Capture for WindowsCapture {
-	fn event_queue(&self) -> &SegQueue<KBMSEvent> {
+	fn event_queue(&self) -> &AtomicRingQueue<KBMSEvent> {
 		&EVENT_QUEUE
+	}
+}
+
+fn event_queue_push(event: KBMSEvent) {
+	let mut push_ev = event;
+
+	loop {
+		match EVENT_QUEUE.try_push(push_ev) {
+			Ok(_) => break,
+			Err(ret_ev) => push_ev = ret_ev,
+		}
+
+		std::hint::spin_loop();
 	}
 }
