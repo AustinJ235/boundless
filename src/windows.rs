@@ -9,7 +9,7 @@ use u16cstr::u16cstr;
 use widestring::U16CStr;
 use windows::core::PCWSTR;
 use windows::Win32::Devices::HumanInterfaceDevice::{
-	HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
+	HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC, MOUSE_MOVE_RELATIVE,
 };
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
@@ -22,12 +22,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 	VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN,
 	VK_SCROLL, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_NOLEGACY};
+use windows::Win32::UI::Input::{
+	GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
+	RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_NOLEGACY, RID_DEVICE_INFO_TYPE, RID_INPUT,
+	RIM_TYPEMOUSE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
 	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, GetShellWindow,
 	RegisterClassExW, SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE,
 	HCURSOR, HHOOK, HICON, HMENU, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
-	WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+	WH_MOUSE_LL, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
 	WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
 	WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE,
 	WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP, WS_VISIBLE,
@@ -48,11 +52,7 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 			WM_RBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Right)),
 			WM_MBUTTONDOWN => Some(KBMSEvent::MSPress(MSButton::Middle)),
 			WM_MBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Middle)),
-			WM_MOUSEMOVE =>
-				Some(KBMSEvent::MSMove(
-					*(lparam.0 as *const i32),
-					*(lparam.0 as *const i32).offset(1),
-				)),
+			WM_MOUSEMOVE => None, // TODO: Maybe use this in the future???
 			WM_MOUSEWHEEL =>
 				Some(KBMSEvent::MSScrollV(
 					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16,
@@ -234,8 +234,9 @@ unsafe extern "system" fn wnd_proc_callback(
 	wparam: WPARAM,
 	lparam: LPARAM,
 ) -> LRESULT {
-	println!("window: {:?}, msg: {}, wparam: {:?}, lparam: {:?}", window, msg, wparam, lparam);
-
+	println!("Window Proc MSG: {:#04x}", msg);
+	// println!("window: {:?}, msg: {}, wparam: {:?}, lparam: {:?}", window, msg, wparam,
+	// lparam);
 	DefWindowProcW(window, msg, wparam, lparam)
 }
 
@@ -351,10 +352,12 @@ impl WindowsCapture {
 			HOOK_MOUSE_LL.store(hook_mouse_ll.0, atomic::Ordering::SeqCst);
 			HOOK_KEYBOARD_LL.store(hook_keyboard_ll.0, atomic::Ordering::SeqCst);
 
+			println!("register");
+
 			let raw_devices = [RAWINPUTDEVICE {
 				usUsagePage: HID_USAGE_PAGE_GENERIC,
 				usUsage: HID_USAGE_GENERIC_MOUSE,
-				dwFlags: RIDEV_NOLEGACY,
+				dwFlags: RIDEV_NOLEGACY | RIDEV_INPUTSINK,
 				hwndTarget: hwnd,
 			}];
 
@@ -380,6 +383,42 @@ impl WindowsCapture {
 				match GetMessageW(&mut message, HWND::default(), 0, 0).ok() {
 					Ok(_) =>
 						match message.message {
+							WM_INPUT => {
+								let mut data: RAWINPUT = std::mem::zeroed();
+								let mut data_size = std::mem::size_of::<RAWINPUT>() as u32;
+
+								match GetRawInputData(
+									std::mem::transmute::<_, HRAWINPUT>(message.lParam),
+									RID_INPUT,
+									&mut data as *mut _ as _,
+									&mut data_size,
+									std::mem::size_of::<RAWINPUTHEADER>() as u32,
+								) {
+									u32::MAX | 0 => {
+										println!("GetRawInputData Failed");
+										continue;
+									},
+									_ => (),
+								}
+
+								match RID_DEVICE_INFO_TYPE(data.header.dwType) {
+									RIM_TYPEMOUSE => {
+										if !PASS_EVENTS.load(atomic::Ordering::SeqCst) {
+											let mouse_data = data.data.mouse;
+
+											if mouse_data.usFlags as u32 | MOUSE_MOVE_RELATIVE
+												== MOUSE_MOVE_RELATIVE
+											{
+												EVENT_QUEUE.push(KBMSEvent::MSMotion(
+													mouse_data.lLastX,
+													mouse_data.lLastY,
+												));
+											}
+										}
+									},
+									ty => println!("Uknown raw input type: {:?}", ty),
+								}
+							},
 							_ => {
 								println!("[MSG]: UNKNOWN: {:?}", message);
 							},

@@ -38,7 +38,7 @@ fn main() {
 pub enum KBMSEvent {
 	MSPress(MSButton),
 	MSRelease(MSButton),
-	MSMove(i32, i32),
+	MSMotion(i32, i32),
 	MSScrollV(i16),
 	MSScrollH(i16),
 	KBPress(KBKey),
