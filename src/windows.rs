@@ -5,14 +5,35 @@ use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{self, AtomicBool, AtomicIsize};
 use std::sync::Arc;
 use std::thread;
+use u16cstr::u16cstr;
+use widestring::U16CStr;
+use windows::core::PCWSTR;
+use windows::Win32::Devices::HumanInterfaceDevice::{
+	HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
+};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+	VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10,
+	VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT,
+	VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_OEM_1, VK_OEM_2, VK_OEM_4,
+	VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
+	VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN,
+	VK_SCROLL, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
+};
+use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_NOLEGACY};
 use windows::Win32::UI::WindowsAndMessaging::{
-	CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
-	KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-	WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-	WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, GetShellWindow,
+	RegisterClassExW, SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE,
+	HCURSOR, HHOOK, HICON, HMENU, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
+	WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+	WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+	WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+	WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP, WS_VISIBLE,
 };
 
+const WINPROC_CLASS_NAME: &'static U16CStr = u16cstr!("Boundless Raw Input");
 static PASS_EVENTS: AtomicBool = AtomicBool::new(true);
 static HOOK_MOUSE_LL: AtomicIsize = AtomicIsize::new(0);
 static HOOK_KEYBOARD_LL: AtomicIsize = AtomicIsize::new(0);
@@ -59,16 +80,8 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 	CallNextHookEx(HHOOK(HOOK_MOUSE_LL.load(atomic::Ordering::SeqCst)), code, wparam, lparam)
 }
 
+#[inline(always)]
 fn vkcode_to_kbkey(code: u32) -> Option<KBKey> {
-	use windows::Win32::UI::Input::KeyboardAndMouse::{
-		VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10,
-		VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME,
-		VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_OEM_1,
-		VK_OEM_2, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS,
-		VK_OEM_PERIOD, VK_OEM_PLUS, VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT,
-		VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
-	};
-
 	Some(match VIRTUAL_KEY(code as _) {
 		VK_BACK => KBKey::Backspace,
 		VK_TAB => KBKey::Tab,
@@ -215,6 +228,17 @@ unsafe extern "system" fn keyboard_ll_hook(
 	CallNextHookEx(HHOOK(HOOK_KEYBOARD_LL.load(atomic::Ordering::SeqCst)), code, wparam, lparam)
 }
 
+unsafe extern "system" fn wnd_proc_callback(
+	window: HWND,
+	msg: u32,
+	wparam: WPARAM,
+	lparam: LPARAM,
+) -> LRESULT {
+	println!("window: {:?}, msg: {}, wparam: {:?}, lparam: {:?}", window, msg, wparam, lparam);
+
+	DefWindowProcW(window, msg, wparam, lparam)
+}
+
 pub struct WindowsCapture {}
 
 impl WindowsCapture {
@@ -225,6 +249,47 @@ impl WindowsCapture {
 		let thread_result_ready = startup_result_ready.clone();
 
 		thread::spawn(move || unsafe {
+			let target_win_class = WNDCLASSEXW {
+				cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+				style: WNDCLASS_STYLES(0),
+				lpfnWndProc: Some(wnd_proc_callback),
+				cbClsExtra: 0,
+				cbWndExtra: 0,
+				hInstance: GetModuleHandleW(PCWSTR::default()),
+				hIcon: HICON(0),
+				hCursor: HCURSOR(0), // must be null in order for cursor state to work properly
+				hbrBackground: HBRUSH(0),
+				lpszMenuName: PCWSTR::default(),
+				lpszClassName: PCWSTR(WINPROC_CLASS_NAME.as_ptr()),
+				hIconSm: HICON(0),
+			};
+
+			RegisterClassExW(&target_win_class);
+
+			let hwnd = CreateWindowExW(
+				WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+				PCWSTR(WINPROC_CLASS_NAME.as_ptr()),
+				PCWSTR::default(),
+				WS_OVERLAPPED,
+				0,
+				0,
+				0,
+				0,
+				HWND(0),
+				HMENU(0),
+				GetModuleHandleW(PCWSTR::default()),
+				std::ptr::null(),
+			);
+
+			SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_VISIBLE | WS_POPUP).0 as isize);
+
+			if hwnd.0 == 0 {
+				*thread_result.lock() =
+					Some(Err(String::from("Failed to create event target window.")));
+				thread_result_ready.notify_one();
+				return;
+			}
+
 			let hook_mouse_ll = match SetWindowsHookExW(
 				WH_MOUSE_LL,
 				Some(mouse_ll_hook),
@@ -285,6 +350,28 @@ impl WindowsCapture {
 
 			HOOK_MOUSE_LL.store(hook_mouse_ll.0, atomic::Ordering::SeqCst);
 			HOOK_KEYBOARD_LL.store(hook_keyboard_ll.0, atomic::Ordering::SeqCst);
+
+			let raw_devices = [RAWINPUTDEVICE {
+				usUsagePage: HID_USAGE_PAGE_GENERIC,
+				usUsage: HID_USAGE_GENERIC_MOUSE,
+				dwFlags: RIDEV_NOLEGACY,
+				hwndTarget: hwnd,
+			}];
+
+			if let Err(e) = RegisterRawInputDevices(
+				&raw_devices,
+				std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+			)
+			.ok()
+			{
+				*thread_result.lock() =
+					Some(Err(format!("Failed to register raw input devices: {}", e)));
+				thread_result_ready.notify_one();
+				UnhookWindowsHookEx(hook_mouse_ll);
+				UnhookWindowsHookEx(hook_keyboard_ll);
+				return;
+			}
+
 			*thread_result.lock() = Some(Ok(()));
 			thread_result_ready.notify_one();
 			let mut message = MSG::default();
