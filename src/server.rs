@@ -3,7 +3,7 @@ use atomicring::AtomicRingQueue;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct Server {
 	thread: JoinHandle<Result<(), String>>,
@@ -11,7 +11,7 @@ pub struct Server {
 
 impl Server {
 	pub fn new() -> Self {
-		let thread = thread::spawn(move || {
+		let thread = thread::spawn(move || -> Result<(), String> {
 			let capture_result: Result<Box<dyn Capture>, String> = {
 				#[cfg(target_os = "windows")]
 				{
@@ -40,9 +40,15 @@ impl Server {
 			let mut current_client: Option<SocketAddr> = None;
 			let mut seq: u128 = 0;
 			let mut socket_buf = [0_u8; 32];
+			let mut last_conn_check = Instant::now();
+			let conn_check_interval = Duration::from_secs(5);
+			let queue_pop_timeout = Duration::from_secs(1);
 
 			loop {
 				if current_client.is_none() {
+					println!("Looking for client...");
+					
+					// If the queue ever fills windows will start to spin
 					capture.event_queue().clear();
 					seq = 0;
 
@@ -53,7 +59,12 @@ impl Server {
 									match event {
 										KBMSEvent::Hello => {
 											match socket.send_to(&socket_buf, &from) {
-												Ok(_) => current_client = Some(from),
+												Ok(_) => {
+													current_client = Some(from);
+													last_conn_check = Instant::now();
+													// Make sure client isn't flood with input when they first connect
+													capture.event_queue().clear(); 
+												},
 												Err(e) =>
 													println!(
 														"Client attempted to connect, but \
@@ -73,17 +84,67 @@ impl Server {
 							},
 						Err(e) =>
 							match e.kind() {
-								io::ErrorKind::WouldBlock => continue,
+								io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => continue,
 								e => return Err(format!("Failed to read from socket: {}", e)),
 							},
 					}
 				} else {
-					let event = capture.event_queue().pop();
-					println!("Sending {:?}, Seq: {}", event, seq);
-					let event_b = event.encode(seq);
-					seq += 1;
+					if last_conn_check.elapsed() >= conn_check_interval {
+						let event_b = KBMSEvent::ConnectionCheck.encode(seq);
+						seq += 1;
 
-					if let Err(e) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
+						if let Err(e) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
+							println!("Failed to send connection check to client: {}", e);
+							current_client = None;
+							continue;
+						}
+
+						loop {
+							match socket.recv_from(&mut socket_buf) {
+								Ok((len, from)) => {
+									if *current_client.as_ref().unwrap() != from {
+										continue;
+									}
+
+									match KBMSEvent::decode(&socket_buf[0..len]) {
+										Some((_, event)) => match event {
+											KBMSEvent::Hello => {
+												println!("Connection check succeeded.");
+												last_conn_check = Instant::now();
+												break;
+											},
+											_ => {
+												println!("Client failed connection check. Received wrong response.");
+												current_client = None;
+												continue;
+											}
+										},
+										None => {
+											println!("Client failed connection check. Failed to decode event.");
+											current_client = None;
+											continue;
+										}
+									}
+								},
+								Err(e) => {
+									println!("Client failed connection check. Socket receive error: {}", e);
+									current_client = None;
+									continue;
+								}
+							}
+						}
+					}
+
+					let event_b = match capture.event_queue().pop_for(queue_pop_timeout.clone()) {
+						Some(event) => {
+							let bytes = event.encode(seq);
+							seq += 1;
+							bytes
+						},
+						None => continue
+					};
+
+					if let Err(_) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
 						println!(
 							"Failed to send message to client. Looking for new connection."
 						);

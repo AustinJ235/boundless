@@ -39,6 +39,7 @@ pub enum KBMSEvent {
 	CaptureEnd,
 	Hello,
 	Goodbye,
+	ConnectionCheck,
 }
 
 impl KBMSEvent {
@@ -102,6 +103,9 @@ impl KBMSEvent {
 			},
 			KBMSEvent::Goodbye => {
 				output.push(10);
+			},
+			KBMSEvent::ConnectionCheck => {
+				output.push(11);
 			},
 		}
 
@@ -189,6 +193,7 @@ impl KBMSEvent {
 			8 => KBMSEvent::CaptureEnd,
 			9 => KBMSEvent::Hello,
 			10 => KBMSEvent::Goodbye,
+			11 => KBMSEvent::ConnectionCheck,
 			_ => return None,
 		};
 
