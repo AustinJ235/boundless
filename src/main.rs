@@ -8,7 +8,7 @@ pub mod server;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-use strum::FromRepr;
+use strum::{EnumIter, FromRepr};
 
 fn main() {
 	#[cfg(target_os = "windows")]
@@ -196,7 +196,7 @@ impl KBMSEvent {
 	}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, FromRepr, EnumIter)]
 #[repr(u8)]
 pub enum MSButton {
 	Left,
@@ -204,7 +204,7 @@ pub enum MSButton {
 	Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, FromRepr, EnumIter)]
 #[repr(u8)]
 pub enum KBKey {
 	Esc,

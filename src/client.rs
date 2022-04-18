@@ -37,8 +37,8 @@ impl Client {
 			socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
 			socket.connect("192.168.1.235:1026").unwrap();
 
-			loop {
-				println!("Attempting Connection...");
+			'connection: loop {
+				println!("Sending Hello...");
 
 				if let Err(e) = socket.send(&KBMSEvent::Hello.encode(0)) {
 					println!("Failed to send Hello: {}", e);
@@ -51,32 +51,37 @@ impl Client {
 							Some((_, some)) =>
 								match some {
 									KBMSEvent::Hello => (),
-									_ => {
+									event => {
 										println!(
-											"Got response from server, but it was not a Hello."
+											"Unexpected response from server {:?} expected \
+											 {:?}",
+											event,
+											KBMSEvent::Hello
 										);
 										continue;
 									},
 								},
 							None => {
-								println!("Got response from server, but it was gibberish.");
+								println!("Failed to decode packet from server.");
 								continue;
 							},
 						},
 					Err(e) =>
 						match e.kind() {
 							io::ErrorKind::WouldBlock => {
-								println!("No Response");
+								println!("No response from server.");
 								continue;
 							},
-							e => {
-								println!("Failed to receive response from server: {:?}", e);
-								continue;
-							},
+							e =>
+								return Err(format!(
+									"Unexpected error attempted to receiver from socket: \
+									 {:?}({})",
+									e, e
+								)),
 						},
 				}
 
-				println!("Connected.");
+				println!("Connected to server.");
 
 				loop {
 					let len = match socket.recv(&mut socket_buf) {
@@ -87,25 +92,26 @@ impl Client {
 									continue;
 								},
 								e => {
-									println!("Failed to receive response from server: {:?}", e);
-									continue;
+									println!(
+										"Unexpected error attempted to receiver from socket: \
+										 {:?}({})",
+										e, e
+									);
+									continue 'connection;
 								},
 							},
 					};
 
 					match KBMSEvent::decode(&socket_buf[0..len]) {
-						Some((seq, event)) => {
-							println!("SEQ: {} | Event: {:?}", seq, event);
-							event_receiver.send_event(event);
+						Some((_seq, event)) => {
+							if let Err(e) = event_receiver.send_event(event) {
+								println!("Failed to write event: {}", e);
+							}
 						},
-						None => {
-							println!("Received gibberish from server");
-						},
+						None => println!("Failed to decode packet from server."),
 					}
 				}
 			}
-
-			Ok(())
 		});
 
 		Self {
@@ -119,11 +125,6 @@ impl Client {
 			Err(_) => Err(String::from("thread panicked")),
 		}
 	}
-}
-
-pub fn client() {
-	let socket = UdpSocket::bind("0.0.0.0:1026").unwrap();
-	let recv_buffer = [0; 64];
 }
 
 pub trait EventReceiver {
