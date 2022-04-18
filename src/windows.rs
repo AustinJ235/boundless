@@ -58,11 +58,13 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 			WM_MOUSEMOVE => None,
 			WM_MOUSEWHEEL =>
 				Some(KBMSEvent::MSScrollV(
-					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16 / 120,
+					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16
+						/ 120,
 				)),
 			WM_MOUSEHWHEEL =>
 				Some(KBMSEvent::MSScrollH(
-					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16 / 120,
+					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16
+						/ 120,
 				)),
 			unknown => {
 				println!("Unknown WPARAM({}) for MOUSE_LL", unknown);

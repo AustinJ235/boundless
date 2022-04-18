@@ -113,18 +113,23 @@ impl Client {
 					match KBMSEvent::decode(&socket_buf[0..len]) {
 						Some((_seq, event)) => {
 							match &event {
-								KBMSEvent::ConnectionCheck => match socket.send(&KBMSEvent::Hello.encode(0)) {
-									Ok(_) => {
-										println!("Connection check succeeded.");
-										last_conn_check = Instant::now();
-										continue;
+								KBMSEvent::ConnectionCheck =>
+									match socket.send(&KBMSEvent::Hello.encode(0)) {
+										Ok(_) => {
+											println!("Connection check succeeded.");
+											last_conn_check = Instant::now();
+											continue;
+										},
+										Err(e) => {
+											println!(
+												"Failed to send Hello in response to \
+												 connection check: {}",
+												e
+											);
+											continue 'connection;
+										},
 									},
-									Err(e) => {
-										println!("Failed to send Hello in response to connection check: {}", e);
-										continue 'connection;
-									}
-								},
-								_ => ()
+								_ => (),
 							}
 
 							if let Err(e) = event_receiver.send_event(event) {

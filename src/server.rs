@@ -44,10 +44,10 @@ impl Server {
 			let conn_check_interval = Duration::from_secs(5);
 			let queue_pop_timeout = Duration::from_secs(1);
 
-			loop {
+			'client_check: loop {
 				if current_client.is_none() {
 					println!("Looking for client...");
-					
+
 					// If the queue ever fills windows will start to spin
 					capture.event_queue().clear();
 					seq = 0;
@@ -62,8 +62,10 @@ impl Server {
 												Ok(_) => {
 													current_client = Some(from);
 													last_conn_check = Instant::now();
-													// Make sure client isn't flood with input when they first connect
-													capture.event_queue().clear(); 
+													// Make sure client isn't flooded with input
+													// when they first connect
+													capture.event_queue().clear();
+													println!("Client has connected.");
 												},
 												Err(e) =>
 													println!(
@@ -93,7 +95,9 @@ impl Server {
 						let event_b = KBMSEvent::ConnectionCheck.encode(seq);
 						seq += 1;
 
-						if let Err(e) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
+						if let Err(e) =
+							socket.send_to(&event_b, current_client.as_ref().unwrap())
+						{
 							println!("Failed to send connection check to client: {}", e);
 							current_client = None;
 							continue;
@@ -107,41 +111,53 @@ impl Server {
 									}
 
 									match KBMSEvent::decode(&socket_buf[0..len]) {
-										Some((_, event)) => match event {
-											KBMSEvent::Hello => {
-												println!("Connection check succeeded.");
-												last_conn_check = Instant::now();
-												break;
+										Some((_, event)) =>
+											match event {
+												KBMSEvent::Hello => {
+													println!("Connection check succeeded.");
+													last_conn_check = Instant::now();
+													break;
+												},
+												_ => {
+													println!(
+														"Client failed connection check. \
+														 Received wrong response."
+													);
+													current_client = None;
+													continue 'client_check;
+												},
 											},
-											_ => {
-												println!("Client failed connection check. Received wrong response.");
-												current_client = None;
-												continue;
-											}
-										},
 										None => {
-											println!("Client failed connection check. Failed to decode event.");
+											println!(
+												"Client failed connection check. Failed to \
+												 decode event."
+											);
 											current_client = None;
-											continue;
-										}
+											continue 'client_check;
+										},
 									}
 								},
 								Err(e) => {
-									println!("Client failed connection check. Socket receive error: {}", e);
+									println!(
+										"Client failed connection check. Socket receive \
+										 error: {}",
+										e
+									);
 									current_client = None;
-									continue;
-								}
+									continue 'client_check;
+								},
 							}
 						}
 					}
 
-					let event_b = match capture.event_queue().pop_for(queue_pop_timeout.clone()) {
+					let event_b = match capture.event_queue().pop_for(queue_pop_timeout.clone())
+					{
 						Some(event) => {
 							let bytes = event.encode(seq);
 							seq += 1;
 							bytes
 						},
-						None => continue
+						None => continue,
 					};
 
 					if let Err(_) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
