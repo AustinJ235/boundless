@@ -73,14 +73,23 @@ impl Server {
 							},
 						Err(e) =>
 							match e.kind() {
-								io::ErrorKind::TimedOut => continue,
+								io::ErrorKind::WouldBlock => continue,
 								e => return Err(format!("Failed to read from socket: {}", e)),
 							},
 					}
 				} else {
-					capture.event_queue().clear();
-					seq = 0;
-					println!("I have a client!");
+					let event = capture.event_queue().pop();
+					println!("Sending {:?}, Seq: {}", event, seq);
+					let event_b = event.encode(seq);
+					seq += 1;
+
+					if let Err(e) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
+						println!(
+							"Failed to send message to client. Looking for new connection."
+						);
+						current_client = None;
+						continue;
+					}
 				}
 			}
 		});

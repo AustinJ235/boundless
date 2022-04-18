@@ -72,7 +72,7 @@ impl EventReceiver for UInputEventReceiver {
 					.write_event(&event_now(EventCode::EV_SYN(EV_SYN::SYN_REPORT), 0))
 					.unwrap();
 			},
-			_ => println!("Unimplemented Event: {:?}", event)
+			_ => println!("Unimplemented Event: {:?}", event),
 		}
 
 		Ok(())

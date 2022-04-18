@@ -1,8 +1,8 @@
 use crate::KBMSEvent;
+use std::io;
 use std::net::UdpSocket;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::io;
 
 pub struct Client {
 	thread: JoinHandle<Result<(), String>>,
@@ -46,29 +46,34 @@ impl Client {
 				}
 
 				match socket.recv(&mut socket_buf) {
-					Ok(len) => match KBMSEvent::decode(&socket_buf[0..len]) {
-						Some((_, some)) => match some {
-							KBMSEvent::Hello => (),
-							_ => {
-								println!("Got response from server, but it was not a Hello.");
+					Ok(len) =>
+						match KBMSEvent::decode(&socket_buf[0..len]) {
+							Some((_, some)) =>
+								match some {
+									KBMSEvent::Hello => (),
+									_ => {
+										println!(
+											"Got response from server, but it was not a Hello."
+										);
+										continue;
+									},
+								},
+							None => {
+								println!("Got response from server, but it was gibberish.");
 								continue;
-							}
+							},
 						},
-						None => {
-							println!("Got response from server, but it was gibberish.");
-							continue;
-						}
-					},
-					Err(e) => match e.kind() {
-						io::ErrorKind::WouldBlock => {
-							println!("No Response");
-							continue;
+					Err(e) =>
+						match e.kind() {
+							io::ErrorKind::WouldBlock => {
+								println!("No Response");
+								continue;
+							},
+							e => {
+								println!("Failed to receive response from server: {:?}", e);
+								continue;
+							},
 						},
-						e => {
-							println!("Failed to receive response from server: {:?}", e);
-							continue;
-						}
-					}
 				}
 
 				println!("Connected.");
@@ -76,15 +81,16 @@ impl Client {
 				loop {
 					let len = match socket.recv(&mut socket_buf) {
 						Ok(ok) => ok,
-						Err(e) => match e.kind() {
-							io::ErrorKind::WouldBlock => {
-								continue;
+						Err(e) =>
+							match e.kind() {
+								io::ErrorKind::WouldBlock => {
+									continue;
+								},
+								e => {
+									println!("Failed to receive response from server: {:?}", e);
+									continue;
+								},
 							},
-							e => {
-								println!("Failed to receive response from server: {:?}", e);
-								continue;
-							}
-						}
 					};
 
 					match KBMSEvent::decode(&socket_buf[0..len]) {
@@ -94,7 +100,7 @@ impl Client {
 						},
 						None => {
 							println!("Received gibberish from server");
-						}
+						},
 					}
 				}
 			}
