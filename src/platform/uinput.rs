@@ -59,16 +59,22 @@ impl UInputEventReceiver {
 }
 
 impl EventReceiver for UInputEventReceiver {
-	fn send_event(&self, _event: KBMSEvent) -> Result<(), String> {
-		self.virtual_device
-			.write_event(&event_now(EventCode::EV_REL(EV_REL::REL_X), 10))
-			.unwrap();
-		self.virtual_device
-			.write_event(&event_now(EventCode::EV_REL(EV_REL::REL_Y), 10))
-			.unwrap();
-		self.virtual_device
-			.write_event(&event_now(EventCode::EV_SYN(EV_SYN::SYN_REPORT), 0))
-			.unwrap();
+	fn send_event(&self, event: KBMSEvent) -> Result<(), String> {
+		match event {
+			KBMSEvent::MSMotion(x, y) => {
+				self.virtual_device
+					.write_event(&event_now(EventCode::EV_REL(EV_REL::REL_X), x))
+					.unwrap();
+				self.virtual_device
+					.write_event(&event_now(EventCode::EV_REL(EV_REL::REL_Y), y))
+					.unwrap();
+				self.virtual_device
+					.write_event(&event_now(EventCode::EV_SYN(EV_SYN::SYN_REPORT), 0))
+					.unwrap();
+			},
+			_ => println!("Unimplemented Event: {:?}", event)
+		}
+
 		Ok(())
 	}
 }
