@@ -95,8 +95,8 @@ impl EventReceiver for UInputEventReceiver {
 				self.report()
 			},
 			KBMSEvent::MSScrollV(amt) => {
-				println!("Unimplemented Event: KBMSEvent::MSScrollV({})", amt);
-				Ok(())
+				self.write_event(EventCode::EV_REL(EV_REL::REL_WHEEL), amt)?;
+				self.report()
 			},
 			KBMSEvent::MSScrollH(amt) => {
 				println!("Unimplemented Event: KBMSEvent::MSScrollH({})", amt);
@@ -114,6 +114,7 @@ impl EventReceiver for UInputEventReceiver {
 			KBMSEvent::CaptureEnd => Ok(()),
 			KBMSEvent::Hello => Ok(()),
 			KBMSEvent::Goodbye => Ok(()),
+			KBMSEvent::ConnectionCheck => Ok(()),
 		}
 	}
 }

@@ -2,7 +2,7 @@ use crate::KBMSEvent;
 use std::io;
 use std::net::UdpSocket;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct Client {
 	thread: JoinHandle<Result<(), String>>,
@@ -33,6 +33,8 @@ impl Client {
 			};
 
 			let mut socket_buf = [0_u8; 32];
+			let mut last_conn_check;
+			let conn_check_interval_max = Duration::from_secs(7);
 			socket.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
 			socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
 			socket.connect("192.168.1.235:1026").unwrap();
@@ -82,6 +84,7 @@ impl Client {
 				}
 
 				println!("Connected to server.");
+				last_conn_check = Instant::now();
 
 				loop {
 					let len = match socket.recv(&mut socket_buf) {
@@ -89,6 +92,11 @@ impl Client {
 						Err(e) =>
 							match e.kind() {
 								io::ErrorKind::WouldBlock => {
+									if last_conn_check.elapsed() > conn_check_interval_max {
+										println!("Connection to server has been lost.");
+										continue 'connection;
+									}
+
 									continue;
 								},
 								e => {
@@ -104,6 +112,21 @@ impl Client {
 
 					match KBMSEvent::decode(&socket_buf[0..len]) {
 						Some((_seq, event)) => {
+							match &event {
+								KBMSEvent::ConnectionCheck => match socket.send(&KBMSEvent::Hello.encode(0)) {
+									Ok(_) => {
+										println!("Connection check succeeded.");
+										last_conn_check = Instant::now();
+										continue;
+									},
+									Err(e) => {
+										println!("Failed to send Hello in response to connection check: {}", e);
+										continue 'connection;
+									}
+								},
+								_ => ()
+							}
+
 							if let Err(e) = event_receiver.send_event(event) {
 								println!("Failed to write event: {}", e);
 							}
