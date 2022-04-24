@@ -138,6 +138,7 @@ fn map_button(button: MSButton) -> EV_KEY {
 fn map_key(key: KBKey) -> EV_KEY {
 	match key {
 		KBKey::Esc => EV_KEY::KEY_ESC,
+		KBKey::Grave => EV_KEY::KEY_GRAVE,
 		KBKey::One => EV_KEY::KEY_1,
 		KBKey::Two => EV_KEY::KEY_2,
 		KBKey::Three => EV_KEY::KEY_3,
