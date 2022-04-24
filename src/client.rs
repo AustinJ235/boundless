@@ -1,6 +1,6 @@
 use crate::KBMSEvent;
 use std::io;
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,7 @@ pub struct Client {
 }
 
 impl Client {
-	pub fn new() -> Self {
+	pub fn new(connect_to: SocketAddr) -> Self {
 		let thread = thread::spawn(move || {
 			let event_receiver_result: Result<Box<dyn EventReceiver>, String> = {
 				#[cfg(target_family = "unix")]
@@ -27,7 +27,7 @@ impl Client {
 				Err(e) => return Err(format!("Failed to initialize event receiver: {}", e)),
 			};
 
-			let socket = match UdpSocket::bind("0.0.0.0:0") {
+			let socket = match UdpSocket::bind(connect_to) {
 				Ok(ok) => ok,
 				Err(e) => return Err(format!("Failed to bind recv socket: {}", e)),
 			};

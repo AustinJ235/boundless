@@ -6,21 +6,92 @@ pub mod client;
 pub mod platform;
 pub mod server;
 
+use std::net::SocketAddr;
+use std::str::FromStr;
 use strum::{EnumIter, FromRepr};
 
 fn main() {
-	#[cfg(target_os = "windows")]
-	{
-		if let Err(e) = server::Server::new().wait_for_exit() {
-			println!("Unexpected Error: {}", e);
+	let mut mode: u8 = 0;
+	let mut args = std::env::args();
+	args.next().unwrap();
+	let mut socket_addr: Option<SocketAddr> = None;
+
+	loop {
+		let arg = match args.next() {
+			Some(some) => some,
+			None => break,
+		};
+
+		match arg.as_str() {
+			"--help" => {
+				println!("Usage:");
+				println!("  --client x.x.x.x:x");
+				println!("    or");
+				println!("  --server x.x.x.x:x");
+				return;
+			},
+			"--client" => {
+				mode = 1;
+				socket_addr = match args.next() {
+					Some(some) =>
+						match SocketAddr::from_str(some.as_str()) {
+							Ok(ok) => Some(ok),
+							Err(e) => {
+								println!("Invalid Address: {}", e);
+								println!("Usage:");
+								println!("  --client x.x.x.x:x");
+								return;
+							},
+						},
+					None => {
+						println!("Usage:");
+						println!("  --client x.x.x.x:x");
+						return;
+					},
+				};
+			},
+			"--server" => {
+				mode = 2;
+				socket_addr = match args.next() {
+					Some(some) =>
+						match SocketAddr::from_str(some.as_str()) {
+							Ok(ok) => Some(ok),
+							Err(e) => {
+								println!("Invalid Address: {}", e);
+								println!("Usage:");
+								println!("  --server x.x.x.x:x");
+								return;
+							},
+						},
+					None => {
+						println!("Usage:");
+						println!("  --server x.x.x.x:x");
+						return;
+					},
+				};
+			},
+			_ => (),
 		}
 	}
 
-	#[cfg(target_family = "unix")]
-	{
-		if let Err(e) = client::Client::new().wait_for_exit() {
-			println!("Unexpected Error: {}", e);
-		}
+	if mode == 0 {
+		println!("Usage:");
+		println!("  --client x.x.x.x:x");
+		println!("    or");
+		println!("  --server x.x.x.x:x");
+		return;
+	}
+
+	match mode {
+		1 =>
+			if let Err(e) = client::Client::new(socket_addr.unwrap()).wait_for_exit() {
+				println!("Unexpected Error: {}", e);
+			},
+		2 =>
+			if let Err(e) = server::Server::new(socket_addr.unwrap()).wait_for_exit() {
+				println!("Unexpected Error: {}", e);
+			},
+		_ => unreachable!(),
 	}
 }
 

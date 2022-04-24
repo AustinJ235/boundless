@@ -10,7 +10,7 @@ pub struct Server {
 }
 
 impl Server {
-	pub fn new() -> Self {
+	pub fn new(bind_to: SocketAddr) -> Self {
 		let thread = thread::spawn(move || -> Result<(), String> {
 			let capture_result: Result<Box<dyn Capture>, String> = {
 				#[cfg(target_os = "windows")]
@@ -28,7 +28,7 @@ impl Server {
 				Err(e) => return Err(format!("Failed to initiate capture: {}", e)),
 			};
 
-			let socket = UdpSocket::bind("0.0.0.0:1026")
+			let socket = UdpSocket::bind(bind_to)
 				.map_err(|e| format!("Failed to bind socket: {}", e))?;
 			socket
 				.set_read_timeout(Some(Duration::from_millis(500)))
