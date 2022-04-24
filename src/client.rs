@@ -27,7 +27,7 @@ impl Client {
 				Err(e) => return Err(format!("Failed to initialize event receiver: {}", e)),
 			};
 
-			let socket = match UdpSocket::bind(connect_to) {
+			let socket = match UdpSocket::bind("0.0.0.0:0") {
 				Ok(ok) => ok,
 				Err(e) => return Err(format!("Failed to bind recv socket: {}", e)),
 			};
@@ -37,7 +37,7 @@ impl Client {
 			let conn_check_interval_max = Duration::from_secs(7);
 			socket.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
 			socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-			socket.connect("192.168.1.235:1026").unwrap();
+			socket.connect(connect_to).unwrap();
 
 			'connection: loop {
 				println!("Sending Hello...");
