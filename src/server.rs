@@ -15,7 +15,7 @@ impl Server {
 			let capture_result: Result<Box<dyn Capture>, String> = {
 				#[cfg(target_os = "windows")]
 				{
-					crate::windows::WindowsCapture::new()
+					crate::platform::windows::WindowsCapture::new()
 				}
 				#[cfg(not(target_os = "windows"))]
 				{

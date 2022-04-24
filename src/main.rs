@@ -5,8 +5,6 @@ extern crate lazy_static;
 pub mod client;
 pub mod platform;
 pub mod server;
-#[cfg(target_os = "windows")]
-pub mod windows;
 
 use strum::{EnumIter, FromRepr};
 
@@ -213,6 +211,7 @@ pub enum MSButton {
 #[repr(u8)]
 pub enum KBKey {
 	Esc,
+	Grave,
 	One,
 	Two,
 	Three,

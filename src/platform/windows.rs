@@ -29,12 +29,12 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
 	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, RegisterClassExW,
-	SetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE, HCURSOR, HHOOK,
+	SetWindowsHookExW, UnhookWindowsHookEx, HCURSOR, HHOOK,
 	HICON, HMENU, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT,
 	WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
 	WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
 	WM_SYSKEYUP, WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-	WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP, WS_VISIBLE,
+	WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED,
 };
 
 const WINPROC_CLASS_NAME: &'static U16CStr = u16cstr!("Boundless Raw Input");
@@ -126,6 +126,7 @@ fn vkcode_to_kbkey(code: u32) -> Option<KBKey> {
 		VK_F10 => KBKey::F10,
 		VK_F11 => KBKey::F11,
 		VK_F12 => KBKey::F12,
+		VIRTUAL_KEY(0x00c0) => KBKey::Grave,
 		VIRTUAL_KEY(0x0030) => KBKey::Zero,
 		VIRTUAL_KEY(0x0031) => KBKey::One,
 		VIRTUAL_KEY(0x0032) => KBKey::Two,
@@ -283,7 +284,7 @@ impl WindowsCapture {
 				std::ptr::null(),
 			);
 
-			SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_VISIBLE | WS_POPUP).0 as isize);
+			//SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_VISIBLE | WS_POPUP).0 as isize);
 
 			if hwnd.0 == 0 {
 				*thread_result.lock() =
