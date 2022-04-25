@@ -4,6 +4,22 @@ use std::net::{SocketAddr, UdpSocket};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub trait EventReceiver {
+	fn send_event(&self, event: KBMSEvent) -> Result<(), String>;
+}
+
+pub trait AudioCapture {
+	fn stream_info(&self) -> StreamInfo;
+	fn next_chunk(&self) -> Vec<f32>;
+	fn try_next_chunk(&self) -> Option<Vec<f32>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamInfo {
+	pub channels: u8,
+	pub sample_rate: u16,
+}
+
 pub struct Client {
 	thread: JoinHandle<Result<(), String>>,
 }
@@ -25,6 +41,22 @@ impl Client {
 			let event_receiver = match event_receiver_result {
 				Ok(ok) => ok,
 				Err(e) => return Err(format!("Failed to initialize event receiver: {}", e)),
+			};
+
+			let audio_capture_result: Result<Box<dyn AudioCapture>, String> = {
+				#[cfg(target_family = "unix")]
+				{
+					crate::platform::pulseaudio::PulseAudioCapture::new()
+				}
+				#[cfg(not(target_family = "unix"))]
+				{
+					Err(String::from("Platform not supported."))
+				}
+			};
+
+			let _audio_capture = match audio_capture_result {
+				Ok(ok) => ok,
+				Err(e) => return Err(format!("Failed to initialize audio capture: {}", e)),
 			};
 
 			let socket = match UdpSocket::bind("0.0.0.0:0") {
@@ -153,8 +185,4 @@ impl Client {
 			Err(_) => Err(String::from("thread panicked")),
 		}
 	}
-}
-
-pub trait EventReceiver {
-	fn send_event(&self, event: KBMSEvent) -> Result<(), String>;
 }
