@@ -1,4 +1,5 @@
-use crate::client::{AudioCapture, StreamInfo};
+use crate::client::AudioCapture;
+use crate::AudioStreamInfo;
 use atomicring::AtomicRingQueue;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
@@ -8,13 +9,13 @@ use std::sync::Arc;
 use std::thread;
 
 pub struct PulseAudioCapture {
-	stream_info: StreamInfo,
+	stream_info: AudioStreamInfo,
 	chunk_queue: Arc<AtomicRingQueue<Vec<f32>>>,
 }
 
 impl PulseAudioCapture {
 	pub fn new() -> Result<Box<dyn AudioCapture>, String> {
-		let ready_result: Arc<Mutex<Option<Result<StreamInfo, String>>>> =
+		let ready_result: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> =
 			Arc::new(Mutex::new(None));
 		let ready_cond = Arc::new(Condvar::new());
 		let chunk_queue = Arc::new(AtomicRingQueue::with_capacity(10));
@@ -29,7 +30,7 @@ impl PulseAudioCapture {
 				channels: 2,
 			};
 
-			let stream_info = StreamInfo {
+			let stream_info = AudioStreamInfo {
 				channels: spec.channels,
 				sample_rate: spec.rate as _,
 			};
@@ -125,7 +126,7 @@ impl PulseAudioCapture {
 }
 
 impl AudioCapture for PulseAudioCapture {
-	fn stream_info(&self) -> StreamInfo {
+	fn stream_info(&self) -> AudioStreamInfo {
 		self.stream_info.clone()
 	}
 

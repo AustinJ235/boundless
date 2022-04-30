@@ -1,4 +1,4 @@
-use crate::KBMSEvent;
+use crate::{AudioStreamInfo, KBMSEvent};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::thread::{self, JoinHandle};
@@ -9,15 +9,9 @@ pub trait EventReceiver {
 }
 
 pub trait AudioCapture {
-	fn stream_info(&self) -> StreamInfo;
+	fn stream_info(&self) -> AudioStreamInfo;
 	fn next_chunk(&self) -> Vec<f32>;
 	fn try_next_chunk(&self) -> Option<Vec<f32>>;
-}
-
-#[derive(Debug, Clone)]
-pub struct StreamInfo {
-	pub channels: u8,
-	pub sample_rate: u16,
 }
 
 pub struct Client {

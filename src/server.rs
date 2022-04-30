@@ -1,9 +1,18 @@
-use crate::KBMSEvent;
+use crate::{AudioStreamInfo, KBMSEvent};
 use atomicring::AtomicRingQueue;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+pub trait Capture {
+	fn event_queue(&self) -> &AtomicRingQueue<KBMSEvent>;
+}
+
+pub trait AudioPlayback {
+	fn set_stream_info(&self, info: AudioStreamInfo);
+	fn push_chunk(&self, chunk: Vec<f32>);
+}
 
 pub struct Server {
 	thread: JoinHandle<Result<(), String>>,
@@ -27,6 +36,8 @@ impl Server {
 				Ok(ok) => ok,
 				Err(e) => return Err(format!("Failed to initiate capture: {}", e)),
 			};
+
+			let _audio = crate::platform::wasapi::WASAPIPlayback::new();
 
 			let socket = UdpSocket::bind(bind_to)
 				.map_err(|e| format!("Failed to bind socket: {}", e))?;
@@ -182,8 +193,4 @@ impl Server {
 			Err(_) => Err(String::from("thread panicked")),
 		}
 	}
-}
-
-pub trait Capture {
-	fn event_queue(&self) -> &AtomicRingQueue<KBMSEvent>;
 }

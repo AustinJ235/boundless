@@ -95,6 +95,12 @@ fn main() {
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct AudioStreamInfo {
+	pub channels: u8,
+	pub sample_rate: u16,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum KBMSEvent {
 	MSPress(MSButton),
