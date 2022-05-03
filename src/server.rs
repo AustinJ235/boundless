@@ -10,8 +10,12 @@ pub trait Capture {
 }
 
 pub trait AudioPlayback {
-	fn set_stream_info(&self, info: AudioStreamInfo);
-	fn push_chunk(&self, chunk: Vec<f32>);
+	// Ok(true) if queue was overwritten, Ok(false) if queue wasn't full, Err if the thread has
+	// exited.
+	fn push_chunk(&self, chunk: Vec<f32>) -> Result<bool, ()>;
+	// Err if the thread has exited.
+	fn stream_info(&self) -> Result<AudioStreamInfo, ()>;
+	fn exit(self) -> Result<(), String>;
 }
 
 pub struct Server {
@@ -40,7 +44,7 @@ impl Server {
 			let audio_res: Result<Box<dyn AudioPlayback>, String> = {
 				#[cfg(target_os = "windows")]
 				{
-					Ok(crate::platform::wasapi::WASAPIPlayback::new())
+					crate::platform::wasapi::WASAPIPlayback::new()
 				}
 				#[cfg(not(target_os = "windows"))]
 				{
@@ -50,7 +54,7 @@ impl Server {
 
 			let _audio =
 				audio_res.map_err(|e| format!("Failed to initiate audio playback: {}", e))?;
-				
+
 			let socket = UdpSocket::bind(bind_to)
 				.map_err(|e| format!("Failed to bind socket: {}", e))?;
 			socket

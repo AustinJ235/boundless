@@ -1,8 +1,9 @@
 use crate::server::AudioPlayback;
 use crate::AudioStreamInfo;
 use atomicring::AtomicRingQueue;
+use parking_lot::{Condvar, Mutex};
+use std::cell::RefCell;
 use std::f32::consts::PI;
-use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -16,76 +17,147 @@ use windows::Win32::System::Com::{
 	CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
 
-pub struct WASAPIPlayback {
-	event_queue: Arc<AtomicRingQueue<Vec<f32>>>,
+thread_local! {
+	static COM_INIT: RefCell<bool> = RefCell::new(false);
 }
 
-enum Event {
-	Config(AudioStreamInfo),
-	Data(Vec<f32>),
+pub struct WASAPIPlayback {
+	audio_chunks: Arc<AtomicRingQueue<Vec<f32>>>,
+	thrd_handle: JoinHandle<Result<(), String>>,
+	stream_info: AudioStreamInfo,
 }
 
 impl WASAPIPlayback {
-	pub fn new() -> Box<dyn AudioPlayback> {
-		let event_queue = Arc::new(AtomicRingQueue::with_capacity(100));
-		let thd_event_queue = event_queue.clone();
+	pub fn new() -> Result<Box<dyn AudioPlayback>, String> {
+		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
+		let thrd_audio_chunks = audio_chunks.clone();
+		let init_res: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> =
+			Arc::new(Mutex::new(None));
+		let init_cond: Arc<Condvar> = Arc::new(Condvar::new());
+		let thrd_init_res = init_res.clone();
+		let thrd_init_cond = init_cond.clone();
 
-		let _handle: JoinHandle<Result<(), String>> = thread::spawn(move || unsafe {
-			CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED)
-				.map_err(|e| format!("CoInitializeEx(): {:?}", e))?;
+		let thrd_handle: JoinHandle<Result<(), String>> = thread::spawn(move || unsafe {
+			if let Err(e) = COM_INIT.with(|com_init_ref| -> Result<(), String> {
+				let mut com_init = com_init_ref.borrow_mut();
+
+				if !*com_init {
+					match CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) {
+						Ok(_) => {
+							*com_init = true;
+							Ok(())
+						},
+						Err(e) => Err(format!("{:?}", e)),
+					}
+				} else {
+					Ok(())
+				}
+			}) {
+				*thrd_init_res.lock() = Some(Err(format!("CoInitializeEx(): {}", e)));
+				thrd_init_cond.notify_one();
+				return Ok(());
+			}
+
 			let devices: IMMDeviceEnumerator =
-				CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-					.map_err(|e| format!("CoCreateInstance(): {:?}", e))?;
+				match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+					Ok(ok) => ok,
+					Err(e) => {
+						*thrd_init_res.lock() =
+							Some(Err(format!("CoCreateInstance(): {:?}", e)));
+						thrd_init_cond.notify_one();
+						return Ok(());
+					},
+				};
+
 			let default_device: IMMDevice =
-				devices.GetDefaultAudioEndpoint(eRender, eConsole).map_err(|e| {
-					format!("IMMDeviceEnumerator::GetDefaultAudioEndpoint(): {:?}", e)
-				})?;
+				match devices.GetDefaultAudioEndpoint(eRender, eConsole) {
+					Ok(ok) => ok,
+					Err(e) => {
+						*thrd_init_res.lock() = Some(Err(format!(
+							"IMMDeviceEnumerator::GetDefaultAudioEndpoint(): {:?}",
+							e
+						)));
+						thrd_init_cond.notify_one();
+						return Ok(());
+					},
+				};
+
 			let mut mbu_audio_client: MaybeUninit<IAudioClient> = MaybeUninit::zeroed();
 
-			default_device
-				.Activate(
-					&IAudioClient::IID,
-					CLSCTX_ALL,
-					ptr::null(),
-					mbu_audio_client.as_mut_ptr() as *mut _,
-				)
-				.map_err(|e| format!("IMMDevice::Activate(): {:?}", e))?;
+			if let Err(e) = default_device.Activate(
+				&IAudioClient::IID,
+				CLSCTX_ALL,
+				ptr::null(),
+				mbu_audio_client.as_mut_ptr() as *mut _,
+			) {
+				*thrd_init_res.lock() = Some(Err(format!("IMMDevice::Activate(): {:?}", e)));
+				thrd_init_cond.notify_one();
+				return Ok(());
+			}
 
 			let audio_client = mbu_audio_client.assume_init();
-			let p_mix_format = audio_client
-				.GetMixFormat()
-				.map_err(|e| format!("IAudioClient::GetMixFormat(): {:?}", e))?;
+			let p_mix_format = match audio_client.GetMixFormat() {
+				Ok(ok) => ok,
+				Err(e) => {
+					*thrd_init_res.lock() =
+						Some(Err(format!("IAudioClient::GetMixFormat(): {:?}", e)));
+					thrd_init_cond.notify_one();
+					return Ok(());
+				},
+			};
 
 			let WAVEFORMATEX {
-				wFormatTag,
 				nChannels,
 				nSamplesPerSec,
-				nAvgBytesPerSec,
 				nBlockAlign,
-				wBitsPerSample,
-				cbSize,
+				// wFormatTag,
+				// nAvgBytesPerSec,
+				// wBitsPerSample,
+				// cbSize,
+				..
 			} = ptr::read_unaligned(p_mix_format);
 
-			audio_client
-				.Initialize(
-					AUDCLNT_SHAREMODE_SHARED,
-					0,
-					300000, // 30ms TODO: Lessen when not using sleep
-					0,
-					p_mix_format,
-					ptr::null(),
-				)
-				.map_err(|e| format!("IAudioClient::Initialize(): {:?}", e))?;
+			if let Err(e) = audio_client.Initialize(
+				AUDCLNT_SHAREMODE_SHARED,
+				0,
+				300000, // 30ms TODO: Lessen when not using sleep
+				0,
+				p_mix_format,
+				ptr::null(),
+			) {
+				*thrd_init_res.lock() =
+					Some(Err(format!("IAudioClient::Initialize(): {:?}", e)));
+				thrd_init_cond.notify_one();
+				return Ok(());
+			}
 
-			let ac_buffer_size = audio_client
-				.GetBufferSize()
-				.map_err(|e| format!("IAudioClient::GetBufferSize(): {:?}", e))?;
+			let ac_buffer_size = match audio_client.GetBufferSize() {
+				Ok(ok) => ok,
+				Err(e) => {
+					*thrd_init_res.lock() =
+						Some(Err(format!("IAudioClient::GetBufferSize(): {:?}", e)));
+					thrd_init_cond.notify_one();
+					return Ok(());
+				},
+			};
+
 			let mut mbu_render_client: MaybeUninit<IAudioRenderClient> = MaybeUninit::zeroed();
 
-			audio_client
+			if let Err(e) = audio_client
 				.GetService(&IAudioRenderClient::IID, mbu_render_client.as_mut_ptr() as *mut _)
-				.map_err(|e| format!("IAudioClient::GetService(): {:?}", e))?;
+			{
+				*thrd_init_res.lock() =
+					Some(Err(format!("IAudioClient::GetService(): {:?}", e)));
+				thrd_init_cond.notify_one();
+				return Ok(());
+			}
 
+			*thrd_init_res.lock() = Some(Ok(AudioStreamInfo {
+				channels: nChannels as _,
+				sample_rate: nSamplesPerSec as _,
+			}));
+
+			thrd_init_cond.notify_one();
 			let render_client = mbu_render_client.assume_init();
 			let mut has_started = false;
 			let mut time = 0.0_f32;
@@ -130,22 +202,50 @@ impl WASAPIPlayback {
 
 				thread::sleep(std::time::Duration::from_millis(5));
 			}
-
-			Ok(())
 		});
 
-		Box::new(Self {
-			event_queue,
-		})
+		let mut init_res_guard = init_res.lock();
+
+		while init_res_guard.is_none() {
+			init_cond.wait(&mut init_res_guard);
+		}
+
+		let stream_info = init_res_guard.take().unwrap()?;
+
+		Ok(Box::new(Self {
+			audio_chunks,
+			stream_info,
+			thrd_handle,
+		}))
 	}
 }
 
 impl AudioPlayback for WASAPIPlayback {
-	fn set_stream_info(&self, info: AudioStreamInfo) {
-		todo!()
+	fn push_chunk(&self, chunk: Vec<f32>) -> Result<bool, ()> {
+		match self.thrd_handle.is_finished() {
+			true => Err(()),
+			false =>
+				match self.audio_chunks.try_push(chunk) {
+					Ok(_) => Ok(false),
+					Err(chunk) => {
+						self.audio_chunks.push_overwrite(chunk);
+						Ok(true)
+					},
+				},
+		}
 	}
 
-	fn push_chunk(&self, chunk: Vec<f32>) {
-		todo!()
+	fn stream_info(&self) -> Result<AudioStreamInfo, ()> {
+		match self.thrd_handle.is_finished() {
+			true => Err(()),
+			false => Ok(self.stream_info.clone()),
+		}
+	}
+
+	fn exit(self) -> Result<(), String> {
+		match self.thrd_handle.join() {
+			Ok(ok) => ok,
+			Err(_) => Err(String::from("thread panicked.")),
+		}
 	}
 }
