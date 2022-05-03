@@ -37,8 +37,20 @@ impl Server {
 				Err(e) => return Err(format!("Failed to initiate capture: {}", e)),
 			};
 
-			let _audio = crate::platform::wasapi::WASAPIPlayback::new();
+			let audio_res: Result<Box<dyn AudioPlayback>, String> = {
+				#[cfg(target_os = "windows")]
+				{
+					Ok(crate::platform::wasapi::WASAPIPlayback::new())
+				}
+				#[cfg(not(target_os = "windows"))]
+				{
+					Err(String::from("Platform not supported."))
+				}
+			};
 
+			let _audio =
+				audio_res.map_err(|e| format!("Failed to initiate audio playback: {}", e))?;
+				
 			let socket = UdpSocket::bind(bind_to)
 				.map_err(|e| format!("Failed to bind socket: {}", e))?;
 			socket

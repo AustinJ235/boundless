@@ -110,11 +110,7 @@ impl EventReceiver for UInputEventReceiver {
 				self.write_event(EventCode::EV_KEY(map_key(key)), 0)?;
 				self.report()
 			},
-			KBMSEvent::CaptureStart => Ok(()),
-			KBMSEvent::CaptureEnd => Ok(()),
-			KBMSEvent::Hello => Ok(()),
-			KBMSEvent::Goodbye => Ok(()),
-			KBMSEvent::ConnectionCheck => Ok(()),
+			_ => Ok(()),
 		}
 	}
 }
