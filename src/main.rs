@@ -84,11 +84,11 @@ fn main() {
 
 	match mode {
 		1 =>
-			if let Err(e) = client::Client::new(socket_addr.unwrap()).wait_for_exit() {
+			if let Err(e) = client::Client::new(socket_addr.unwrap(), true).wait_for_exit() {
 				println!("Unexpected Error: {}", e);
 			},
 		2 =>
-			if let Err(e) = server::Server::new(socket_addr.unwrap()).wait_for_exit() {
+			if let Err(e) = server::Server::new(socket_addr.unwrap(), true).wait_for_exit() {
 				println!("Unexpected Error: {}", e);
 			},
 		_ => unreachable!(),
@@ -112,9 +112,15 @@ pub enum KBMSEvent {
 	KBRelease(KBKey),
 	CaptureStart,
 	CaptureEnd,
-	Hello,
-	Goodbye,
+	ClientInfo {
+		audio: bool,
+	},
+	ServerInfo {
+		audio_port: Option<u32>,
+	},
 	ConnectionCheck,
+	ConnectionGood,
+	ConnectionBad,
 }
 
 impl KBMSEvent {
@@ -173,14 +179,30 @@ impl KBMSEvent {
 			KBMSEvent::CaptureEnd => {
 				output.push(8);
 			},
-			KBMSEvent::Hello => {
+			KBMSEvent::ClientInfo {
+				audio,
+			} => {
 				output.push(9);
+				output.push(*audio as u8);
 			},
-			KBMSEvent::Goodbye => {
+			KBMSEvent::ServerInfo {
+				audio_port,
+			} => {
 				output.push(10);
+				let p_b = audio_port.unwrap_or(0).to_le_bytes();
+
+				for byte in p_b {
+					output.push(byte);
+				}
 			},
 			KBMSEvent::ConnectionCheck => {
 				output.push(11);
+			},
+			KBMSEvent::ConnectionGood => {
+				output.push(12);
+			},
+			KBMSEvent::ConnectionBad => {
+				output.push(13);
 			},
 		}
 
@@ -266,9 +288,39 @@ impl KBMSEvent {
 			},
 			7 => KBMSEvent::CaptureStart,
 			8 => KBMSEvent::CaptureEnd,
-			9 => KBMSEvent::Hello,
-			10 => KBMSEvent::Goodbye,
+			9 => {
+				if bytes.len() < 18 {
+					return None;
+				}
+
+				let audio = match bytes[17] {
+					0 => false,
+					1 => true,
+					_ => return None,
+				};
+
+				KBMSEvent::ClientInfo {
+					audio,
+				}
+			},
+			10 => {
+				if bytes.len() < 21 {
+					return None;
+				}
+
+				let audio_port =
+					match u32::from_le_bytes([bytes[17], bytes[18], bytes[19], bytes[20]]) {
+						0 => None,
+						p => Some(p),
+					};
+
+				KBMSEvent::ServerInfo {
+					audio_port,
+				}
+			},
 			11 => KBMSEvent::ConnectionCheck,
+			12 => KBMSEvent::ConnectionGood,
+			13 => KBMSEvent::ConnectionBad,
 			_ => return None,
 		};
 

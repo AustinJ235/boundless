@@ -19,7 +19,7 @@ pub struct Client {
 }
 
 impl Client {
-	pub fn new(connect_to: SocketAddr) -> Self {
+	pub fn new(connect_to: SocketAddr, audio_enable: bool) -> Self {
 		let thread = thread::spawn(move || {
 			let event_receiver_result: Result<Box<dyn EventReceiver>, String> = {
 				#[cfg(target_family = "unix")]
@@ -68,7 +68,12 @@ impl Client {
 			'connection: loop {
 				println!("Sending Hello...");
 
-				if let Err(e) = socket.send(&KBMSEvent::Hello.encode(0)) {
+				if let Err(e) = socket.send(
+					&KBMSEvent::ClientInfo {
+						audio: audio_enable,
+					}
+					.encode(0),
+				) {
 					println!("Failed to send Hello: {}", e);
 					continue;
 				}
@@ -78,13 +83,15 @@ impl Client {
 						match KBMSEvent::decode(&socket_buf[0..len]) {
 							Some((_, some)) =>
 								match some {
-									KBMSEvent::Hello => (),
+									KBMSEvent::ServerInfo {
+										audio_port,
+									} => {
+										println!("Connected. Audio Port {:?}", audio_port);
+									},
 									event => {
 										println!(
-											"Unexpected response from server {:?} expected \
-											 {:?}",
-											event,
-											KBMSEvent::Hello
+											"Unexpected response from server {:?}.",
+											event
 										);
 										continue;
 									},
@@ -140,7 +147,7 @@ impl Client {
 						Some((_seq, event)) => {
 							match &event {
 								KBMSEvent::ConnectionCheck =>
-									match socket.send(&KBMSEvent::Hello.encode(0)) {
+									match socket.send(&KBMSEvent::ConnectionGood.encode(0)) {
 										Ok(_) => {
 											println!("Connection check succeeded.");
 											last_conn_check = Instant::now();

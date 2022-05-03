@@ -19,7 +19,7 @@ pub struct Server {
 }
 
 impl Server {
-	pub fn new(bind_to: SocketAddr) -> Self {
+	pub fn new(bind_to: SocketAddr, audio_enable: bool) -> Self {
 		let thread = thread::spawn(move || -> Result<(), String> {
 			let capture_result: Result<Box<dyn Capture>, String> = {
 				#[cfg(target_os = "windows")]
@@ -54,6 +54,7 @@ impl Server {
 			let mut last_conn_check = Instant::now();
 			let conn_check_interval = Duration::from_secs(5);
 			let queue_pop_timeout = Duration::from_secs(1);
+			let audio_port: u32 = 53482;
 
 			'client_check: loop {
 				if current_client.is_none() {
@@ -68,8 +69,25 @@ impl Server {
 							match KBMSEvent::decode(&socket_buf[0..len]) {
 								Some((_, event)) =>
 									match event {
-										KBMSEvent::Hello => {
-											match socket.send_to(&socket_buf, &from) {
+										KBMSEvent::ClientInfo {
+											audio,
+										} => {
+											let audio_port = match audio {
+												true =>
+													match audio_enable {
+														true => Some(audio_port),
+														false => None,
+													},
+												false => None,
+											};
+
+											match socket.send_to(
+												&KBMSEvent::ServerInfo {
+													audio_port,
+												}
+												.encode(0),
+												&from,
+											) {
 												Ok(_) => {
 													current_client = Some(from);
 													last_conn_check = Instant::now();
@@ -124,7 +142,7 @@ impl Server {
 									match KBMSEvent::decode(&socket_buf[0..len]) {
 										Some((_, event)) =>
 											match event {
-												KBMSEvent::Hello => {
+												KBMSEvent::ConnectionGood => {
 													println!("Connection check succeeded.");
 													last_conn_check = Instant::now();
 													break;
