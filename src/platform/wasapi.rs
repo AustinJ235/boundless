@@ -121,7 +121,7 @@ impl WASAPIPlayback {
 			if let Err(e) = audio_client.Initialize(
 				AUDCLNT_SHAREMODE_SHARED,
 				0,
-				300000, // 30ms TODO: Lessen when not using sleep
+				300000,
 				0,
 				p_mix_format,
 				ptr::null(),
@@ -164,9 +164,9 @@ impl WASAPIPlayback {
 
 			let mut pending_samples: VecDeque<f32> =
 				VecDeque::with_capacity(ac_buffer_size as usize * nChannels as usize);
-			let zero_threshold = ac_buffer_size / 2;
+			let zero_threshold = ac_buffer_size / 4;
 			let block_duration = Duration::from_micros(
-				(((ac_buffer_size / 2) as f64 / nSamplesPerSec as f64) * 1000000.0).trunc()
+				(((ac_buffer_size / 4) as f64 / nSamplesPerSec as f64) * 1000000.0).trunc()
 					as u64,
 			);
 
