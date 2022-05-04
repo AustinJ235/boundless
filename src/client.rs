@@ -10,8 +10,7 @@ pub trait EventReceiver {
 
 pub trait AudioCapture {
 	fn stream_info(&self) -> AudioStreamInfo;
-	fn next_chunk(&self) -> Vec<f32>;
-	fn try_next_chunk(&self) -> Option<Vec<f32>>;
+	fn set_socket_addr(&self, addr: Option<SocketAddr>);
 }
 
 pub struct Client {
@@ -37,20 +36,24 @@ impl Client {
 				Err(e) => return Err(format!("Failed to initialize event receiver: {}", e)),
 			};
 
-			let audio_capture_result: Result<Box<dyn AudioCapture>, String> = {
-				#[cfg(target_family = "unix")]
-				{
-					crate::platform::pulseaudio::PulseAudioCapture::new()
-				}
-				#[cfg(not(target_family = "unix"))]
-				{
-					Err(String::from("Platform not supported."))
-				}
-			};
+			let audio_capture_op = if audio_enable {
+				let audio_capture_result: Result<Box<dyn AudioCapture>, String> = {
+					#[cfg(target_family = "unix")]
+					{
+						crate::platform::pulseaudio::PulseAudioCapture::new()
+					}
+					#[cfg(not(target_family = "unix"))]
+					{
+						Err(String::from("Platform not supported."))
+					}
+				};
 
-			let _audio_capture = match audio_capture_result {
-				Ok(ok) => ok,
-				Err(e) => return Err(format!("Failed to initialize audio capture: {}", e)),
+				match audio_capture_result {
+					Ok(ok) => Some(ok),
+					Err(e) => return Err(format!("Failed to initialize audio capture: {}", e)),
+				}
+			} else {
+				None
 			};
 
 			let socket = match UdpSocket::bind("0.0.0.0:0") {
@@ -63,7 +66,7 @@ impl Client {
 			let conn_check_interval_max = Duration::from_secs(7);
 			socket.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
 			socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-			socket.connect(connect_to).unwrap();
+			socket.connect(connect_to.clone()).unwrap();
 
 			'connection: loop {
 				println!("Sending Hello...");
@@ -85,9 +88,21 @@ impl Client {
 								match some {
 									KBMSEvent::ServerInfo {
 										audio_port,
-									} => {
-										println!("Connected. Audio Port {:?}", audio_port);
-									},
+									} =>
+										if audio_capture_op.is_some() {
+											if let Some(audio_port) = audio_port {
+												let mut audio_socket_addr = connect_to.clone();
+												audio_socket_addr.set_port(audio_port as _);
+												println!(
+													"[Audio]: Connected to {}",
+													audio_socket_addr
+												);
+												audio_capture_op
+													.as_ref()
+													.unwrap()
+													.set_socket_addr(Some(audio_socket_addr));
+											}
+										},
 									event => {
 										println!(
 											"Unexpected response from server {:?}.",
@@ -127,6 +142,9 @@ impl Client {
 								io::ErrorKind::WouldBlock => {
 									if last_conn_check.elapsed() > conn_check_interval_max {
 										println!("Connection to server has been lost.");
+										audio_capture_op
+											.as_ref()
+											.map(|c| c.set_socket_addr(None));
 										continue 'connection;
 									}
 
@@ -138,6 +156,7 @@ impl Client {
 										 {:?}({})",
 										e, e
 									);
+									audio_capture_op.as_ref().map(|c| c.set_socket_addr(None));
 									continue 'connection;
 								},
 							},
@@ -159,6 +178,10 @@ impl Client {
 												 connection check: {}",
 												e
 											);
+
+											audio_capture_op
+												.as_ref()
+												.map(|c| c.set_socket_addr(None));
 											continue 'connection;
 										},
 									},
