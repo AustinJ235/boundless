@@ -3,10 +3,11 @@ use crate::AudioStreamInfo;
 use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::cell::RefCell;
-use std::f32::consts::PI;
+use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::{ptr, slice};
 use windows::core::Interface;
 use windows::Win32::Media::Audio::{
@@ -28,7 +29,7 @@ pub struct WASAPIPlayback {
 }
 
 impl WASAPIPlayback {
-	pub fn new() -> Result<Box<dyn AudioPlayback>, String> {
+	pub fn new() -> Result<Box<dyn AudioPlayback + Send>, String> {
 		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
 		let thrd_audio_chunks = audio_chunks.clone();
 		let init_res: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> =
@@ -160,47 +161,99 @@ impl WASAPIPlayback {
 			thrd_init_cond.notify_one();
 			let render_client = mbu_render_client.assume_init();
 			let mut has_started = false;
-			let mut time = 0.0_f32;
-			let frame_time = 1.0 / nSamplesPerSec as f32;
+
+			let mut pending_samples: VecDeque<f32> =
+				VecDeque::with_capacity(ac_buffer_size as usize * nChannels as usize);
+			let zero_threshold = ac_buffer_size / 2;
+			let block_duration = Duration::from_micros(
+				(((ac_buffer_size / 2) as f64 / nSamplesPerSec as f64) * 1000000.0).trunc()
+					as u64,
+			);
 
 			loop {
 				let padding = audio_client
 					.GetCurrentPadding()
 					.map_err(|e| format!("IAudioClient::GetCurrentPadding(): {:?}", e))?;
 				let available_size = ac_buffer_size - padding;
-				let p_buffer = render_client
-					.GetBuffer(available_size)
-					.map_err(|e| format!("IAudioRenderClient::GetBuffer(): {:?}", e))?;
-				let buffer_bytes = slice::from_raw_parts_mut(
-					p_buffer,
-					available_size as usize * nBlockAlign as usize,
-				);
 
-				for frame_bytes in buffer_bytes.chunks_exact_mut(nBlockAlign as usize) {
-					let sample = (2.0 * 440.0 * PI * time).sin();
-					time += frame_time;
+				let buffer_samples_available = available_size as usize * nChannels as usize;
+				let samples_required_before_block = if padding < zero_threshold {
+					(zero_threshold - padding) as usize
+				} else {
+					0
+				};
 
-					for sample_bytes in
-						frame_bytes.chunks_exact_mut((nBlockAlign / nChannels) as usize)
-					{
-						for (src, dst) in sample.to_le_bytes().into_iter().zip(sample_bytes) {
-							*dst = src;
-						}
+				while pending_samples.len() < buffer_samples_available {
+					match thrd_audio_chunks.try_pop() {
+						Some(chunk) =>
+							for sample in chunk {
+								pending_samples.push_back(sample);
+							},
+						None => break,
 					}
 				}
 
-				render_client
-					.ReleaseBuffer(available_size, 0)
-					.map_err(|e| format!("IAudioRenderClient::ReleaseBuffer(): {:?}", e))?;
+				let mut zero_samples = 0;
 
-				if !has_started {
-					audio_client
-						.Start()
-						.map_err(|e| format!("IAudioClient::Start(): {:?}", e))?;
-					has_started = true;
+				if pending_samples.len() < samples_required_before_block {
+					zero_samples = samples_required_before_block - pending_samples.len();
 				}
 
-				thread::sleep(std::time::Duration::from_millis(5));
+				let write_samples_count = if pending_samples.len() > buffer_samples_available {
+					buffer_samples_available
+				} else {
+					pending_samples.len() + zero_samples
+				};
+
+				if write_samples_count > 0 {
+					let mut samples_to_write: Vec<f32> =
+						Vec::with_capacity(write_samples_count);
+
+					while samples_to_write.len() < write_samples_count - zero_samples {
+						samples_to_write.push(pending_samples.pop_front().unwrap());
+					}
+
+					for _ in 0..zero_samples {
+						samples_to_write.push(0.0);
+					}
+
+					let frames_to_write = write_samples_count as u32 / nChannels as u32;
+					let p_buffer = render_client
+						.GetBuffer(frames_to_write)
+						.map_err(|e| format!("IAudioRenderClient::GetBuffer(): {:?}", e))?;
+					let buffer_bytes = slice::from_raw_parts_mut(
+						p_buffer,
+						frames_to_write as usize * nBlockAlign as usize,
+					);
+
+					for (dst_bytes, src) in buffer_bytes
+						.chunks_exact_mut((nBlockAlign / nChannels) as usize)
+						.zip(samples_to_write.into_iter())
+					{
+						for (dst_byte, src_byte) in
+							dst_bytes.into_iter().zip(src.to_le_bytes().into_iter())
+						{
+							*dst_byte = src_byte;
+						}
+					}
+
+					render_client
+						.ReleaseBuffer(frames_to_write, 0)
+						.map_err(|e| format!("IAudioRenderClient::ReleaseBuffer(): {:?}", e))?;
+
+					if !has_started {
+						audio_client
+							.Start()
+							.map_err(|e| format!("IAudioClient::Start(): {:?}", e))?;
+						has_started = true;
+					}
+				}
+
+				if let Some(chunk) = thrd_audio_chunks.pop_for(block_duration.clone()) {
+					for sample in chunk {
+						pending_samples.push_back(sample);
+					}
+				}
 			}
 		});
 

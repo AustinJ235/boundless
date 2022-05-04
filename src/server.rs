@@ -41,20 +41,6 @@ impl Server {
 				Err(e) => return Err(format!("Failed to initiate capture: {}", e)),
 			};
 
-			let audio_res: Result<Box<dyn AudioPlayback>, String> = {
-				#[cfg(target_os = "windows")]
-				{
-					crate::platform::wasapi::WASAPIPlayback::new()
-				}
-				#[cfg(not(target_os = "windows"))]
-				{
-					Err(String::from("Platform not supported."))
-				}
-			};
-
-			let _audio =
-				audio_res.map_err(|e| format!("Failed to initiate audio playback: {}", e))?;
-
 			let socket = UdpSocket::bind(bind_to)
 				.map_err(|e| format!("Failed to bind socket: {}", e))?;
 			socket
@@ -70,7 +56,69 @@ impl Server {
 			let mut last_conn_check = Instant::now();
 			let conn_check_interval = Duration::from_secs(5);
 			let queue_pop_timeout = Duration::from_secs(1);
-			let audio_port: u32 = 53482;
+
+			let audio_port = if audio_enable {
+				let audio_res: Result<Box<dyn AudioPlayback + Send>, String> = {
+					#[cfg(target_os = "windows")]
+					{
+						crate::platform::wasapi::WASAPIPlayback::new()
+					}
+					#[cfg(not(target_os = "windows"))]
+					{
+						Err(String::from("Platform not supported."))
+					}
+				};
+
+				let audio = audio_res
+					.map_err(|e| format!("Failed to initiate audio playback: {}", e))?;
+				let audio_socket = UdpSocket::bind("0.0.0.0:0")
+					.map_err(|e| format!("Failed to bind audio socket: {}", e))?;
+				let audio_port = audio_socket
+					.local_addr()
+					.map_err(|e| format!("Failed to obtain port for audio socket: {}", e))?
+					.port() as u32;
+
+				thread::spawn(move || {
+					let mut socket_buf = vec![0_u8; 65535];
+
+					loop {
+						match audio_socket.recv_from(socket_buf.as_mut_slice()) {
+							Ok((len, _)) => {
+								let mut audio_chunk = Vec::with_capacity(len / 4);
+
+								for sample_bytes in socket_buf[0..len].chunks_exact(4) {
+									audio_chunk.push(f32::from_le_bytes([
+										sample_bytes[0],
+										sample_bytes[1],
+										sample_bytes[2],
+										sample_bytes[3],
+									]));
+								}
+
+								match audio.push_chunk(audio_chunk) {
+									Ok(overwritten) =>
+										if overwritten {
+											println!(
+												"[Audio]: Incoming data overwrote data. \
+												 Playback buffer is full."
+											);
+										},
+									Err(_) => {
+										// TODO: call exit() somehow
+										println!("[Audio]: Playback thread has exited.");
+										return;
+									},
+								}
+							},
+							Err(_) => (),
+						}
+					}
+				});
+
+				Some(audio_port)
+			} else {
+				None
+			};
 
 			'client_check: loop {
 				if current_client.is_none() {
@@ -91,7 +139,7 @@ impl Server {
 											let audio_port = match audio {
 												true =>
 													match audio_enable {
-														true => Some(audio_port),
+														true => audio_port,
 														false => None,
 													},
 												false => None,
