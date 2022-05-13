@@ -2,13 +2,17 @@
 #[macro_use]
 extern crate lazy_static;
 
+pub mod host;
 pub mod client;
 pub mod platform;
+pub mod secure_socket;
 pub mod server;
 
 use std::net::SocketAddr;
 use std::str::FromStr;
 use strum::{EnumIter, FromRepr};
+use std::io::Write;
+use crate::host::HostInfo;
 
 fn main() {
 	let mut mode: u8 = 0;
@@ -69,6 +73,139 @@ fn main() {
 						return;
 					},
 				};
+			},
+			"--generate-keys" => {
+				let data_file_path = match crate::HostInfo::data_file() {
+					Ok(ok) => ok,
+					Err(e) => {
+						println!("[Error]: {}", e);
+						return;
+					}
+				};
+
+				if data_file_path.exists() {
+					println!("This will erase existing keys and trusted hosts!");
+					print!("  Continue with this action? [y/n]: ");
+					std::io::stdout().flush().unwrap();
+
+					let mut line = String::new();
+
+					if !loop {
+						std::io::stdin().read_line(&mut line).unwrap();
+
+						match line.trim() {
+							"y" | "Y" => break true,
+							"n" | "N" => break false,
+							_ => {
+								print!("  Continue with this action? [y/n]: ");
+								std::io::stdout().flush().unwrap();
+								line.clear();
+							}
+						}
+					} {
+						println!("Aborted.");
+						return;
+					}
+				}
+
+				let host_info = HostInfo::generate();
+
+				if let Err(e) = host_info.save() {
+					println!("[Error]: {}", e);
+					return;
+				}
+
+				println!("Keys have been generated!");
+				return;
+			},
+			"--public-key" => {
+				let host_info = match HostInfo::load() {
+					Ok(ok) => ok,
+					Err(e) => {
+						println!("[Error]: {}", e);
+						return;
+					}
+				};
+
+				println!("Public Key: {}", host_info.enc_public_key());
+				return;
+			},
+			"--trust" => {
+				let enc_public_key = match args.next() {
+					Some(some) => some,
+					None => {
+						println!("Usage: --trust [public_key]");
+						return;
+					}
+				};
+
+				let mut host_info = match HostInfo::load() {
+					Ok(ok) => ok,
+					Err(e) => {
+						println!("[Error]: {}", e);
+						return;
+					}
+				};
+
+				if let Err(e) = host_info.trust(enc_public_key) {
+					println!("[Error]: {}", e);
+					return;
+				}
+
+				if let Err(e) = host_info.save() {
+					println!("[Error]: {}", e);
+					return;
+				}
+
+				println!("Host has been added to the trusted list.");
+				return;
+			},
+			"--distrust" => {
+				let enc_public_key = match args.next() {
+					Some(some) => some,
+					None => {
+						println!("Usage: --trust [public_key]");
+						return;
+					}
+				};
+
+				let mut host_info = match HostInfo::load() {
+					Ok(ok) => ok,
+					Err(e) => {
+						println!("[Error]: {}", e);
+						return;
+					}
+				};
+
+				if let Err(e) = host_info.distrust(enc_public_key) {
+					println!("[Error]: {}", e);
+					return;
+				}
+
+				if let Err(e) = host_info.save() {
+					println!("[Error]: {}", e);
+					return;
+				}
+
+				println!("Host has been removed to the trusted list.");
+				return;
+			},
+			"--trusted" => {
+				let host_info = match HostInfo::load() {
+					Ok(ok) => ok,
+					Err(e) => {
+						println!("[Error]: {}", e);
+						return;
+					}
+				};
+
+				println!("Trusted Public Keys:");
+
+				for pk in host_info.trusted() {
+					println!("  {}", pk);
+				}
+
+				return;
 			},
 			_ => (),
 		}
