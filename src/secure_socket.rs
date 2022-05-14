@@ -426,6 +426,13 @@ impl SecureSocketHost {
 		Ok(host_ret)
 	}
 
+	pub fn send(&self, client_id: Hash, data: Vec<u8>) -> Result<(), String> {
+		let mut clients = self.clients.lock();
+		let mut client_state =
+			clients.get_mut(&client_id).ok_or(String::from("Client not connected."))?;
+		self.send_inner(&mut client_state, PacketType::Message, data)
+	}
+
 	fn send_inner(
 		&self,
 		client_state: &mut ClientState,
@@ -656,7 +663,7 @@ impl SecureSocketClient {
 		r_msg.extend_from_slice(&rand_data);
 		r_msg.extend_from_slice(rand_hash.as_bytes());
 		client
-			.send_message(PacketType::Verify, r_msg)
+			.send_inner(PacketType::Verify, r_msg)
 			.map_err(|e| format!("Connection Failed: send error: {}", e))?;
 
 		// Verify Receive
@@ -771,7 +778,11 @@ impl SecureSocketClient {
 		Ok(Some((packet_type, msg)))
 	}
 
-	fn send_message(&self, packet_type: PacketType, mut data: Vec<u8>) -> Result<(), String> {
+	pub fn send(&self, data: Vec<u8>) -> Result<(), String> {
+		self.send_inner(PacketType::Message, data)
+	}
+
+	fn send_inner(&self, packet_type: PacketType, mut data: Vec<u8>) -> Result<(), String> {
 		let mut client_state = self.state.lock();
 		let mut send_buf = Vec::with_capacity(129);
 		send_buf.push(packet_type as u8);
