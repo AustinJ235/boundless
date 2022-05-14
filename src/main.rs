@@ -3,12 +3,12 @@
 extern crate lazy_static;
 
 pub mod client;
-pub mod host;
+pub mod host_keys;
 pub mod platform;
 pub mod secure_socket;
 pub mod server;
 
-use crate::host::HostKeys;
+use crate::host_keys::HostKeys;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;

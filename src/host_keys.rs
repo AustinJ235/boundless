@@ -177,15 +177,10 @@ impl HostKeys {
 		Ok(self.trusted_remote_hosts.remove(&remote_id).is_some())
 	}
 
-	pub fn verify_message(
-		&self,
-		id: Hash,
-		message: &[u8],
-		signature: &[u8],
-	) -> Result<(), String> {
+	pub fn verify_message(&self, id: Hash, sig_b: &[u8], message: &[u8]) -> Result<(), String> {
 		let pk = self.public_key_of(id).ok_or(String::from("not trusted"))?;
 		let signature =
-			Signature::from_der(signature).map_err(|_| String::from("invalid signature"))?;
+			Signature::from_der(sig_b).map_err(|_| String::from("invalid signature"))?;
 		pk.verify(message, &signature).map_err(|_| String::from("inauthentic"))
 	}
 
