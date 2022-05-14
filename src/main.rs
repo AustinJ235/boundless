@@ -2,17 +2,17 @@
 #[macro_use]
 extern crate lazy_static;
 
-pub mod host;
 pub mod client;
+pub mod host;
 pub mod platform;
 pub mod secure_socket;
 pub mod server;
 
+use crate::host::HostKeys;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use strum::{EnumIter, FromRepr};
-use std::io::Write;
-use crate::host::HostInfo;
 
 fn main() {
 	let mut mode: u8 = 0;
@@ -75,12 +75,12 @@ fn main() {
 				};
 			},
 			"--generate-keys" => {
-				let data_file_path = match crate::HostInfo::data_file() {
+				let data_file_path = match crate::HostKeys::data_file() {
 					Ok(ok) => ok,
 					Err(e) => {
 						println!("[Error]: {}", e);
 						return;
-					}
+					},
 				};
 
 				if data_file_path.exists() {
@@ -100,7 +100,7 @@ fn main() {
 								print!("  Continue with this action? [y/n]: ");
 								std::io::stdout().flush().unwrap();
 								line.clear();
-							}
+							},
 						}
 					} {
 						println!("Aborted.");
@@ -108,7 +108,7 @@ fn main() {
 					}
 				}
 
-				let host_info = HostInfo::generate();
+				let host_info = HostKeys::generate();
 
 				if let Err(e) = host_info.save() {
 					println!("[Error]: {}", e);
@@ -119,12 +119,12 @@ fn main() {
 				return;
 			},
 			"--public-key" => {
-				let host_info = match HostInfo::load() {
+				let host_info = match HostKeys::load() {
 					Ok(ok) => ok,
 					Err(e) => {
 						println!("[Error]: {}", e);
 						return;
-					}
+					},
 				};
 
 				println!("Public Key: {}", host_info.enc_public_key());
@@ -136,15 +136,15 @@ fn main() {
 					None => {
 						println!("Usage: --trust [public_key]");
 						return;
-					}
+					},
 				};
 
-				let mut host_info = match HostInfo::load() {
+				let mut host_info = match HostKeys::load() {
 					Ok(ok) => ok,
 					Err(e) => {
 						println!("[Error]: {}", e);
 						return;
-					}
+					},
 				};
 
 				if let Err(e) = host_info.trust(enc_public_key) {
@@ -166,15 +166,15 @@ fn main() {
 					None => {
 						println!("Usage: --trust [public_key]");
 						return;
-					}
+					},
 				};
 
-				let mut host_info = match HostInfo::load() {
+				let mut host_info = match HostKeys::load() {
 					Ok(ok) => ok,
 					Err(e) => {
 						println!("[Error]: {}", e);
 						return;
-					}
+					},
 				};
 
 				if let Err(e) = host_info.distrust(enc_public_key) {
@@ -191,12 +191,12 @@ fn main() {
 				return;
 			},
 			"--trusted" => {
-				let host_info = match HostInfo::load() {
+				let host_info = match HostKeys::load() {
 					Ok(ok) => ok,
 					Err(e) => {
 						println!("[Error]: {}", e);
 						return;
-					}
+					},
 				};
 
 				println!("Trusted Public Keys:");

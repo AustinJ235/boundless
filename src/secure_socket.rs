@@ -534,30 +534,30 @@ impl SecureSocketClient {
 	}
 }
 
-/*#[test]
-fn test() {
-	use std::thread;
-
-	let h_thrd_h = thread::spawn(move || {
-		let host = SecureSocketHost::listen(
-			vec![machine_uid()],
-			"0.0.0.0:1026",
-			Box::new(move |_host, _client_uid, _packet_type, _packet_data| {}),
-		)
-		.unwrap();
-
-		host.wait_for_exit().unwrap();
-	});
-
-	let c_thrd_h = thread::spawn(move || {
-		let _client = SecureSocketClient::connect(
-			machine_uid(),
-			"127.0.0.1:1026",
-			Box::new(move |_client, _packet_type, _packet_data| {}),
-		)
-		.unwrap();
-	});
-
-	h_thrd_h.join().unwrap();
-	c_thrd_h.join().unwrap();
-}*/
+// #[test]
+// fn test() {
+// use std::thread;
+//
+// let h_thrd_h = thread::spawn(move || {
+// let host = SecureSocketHost::listen(
+// vec![machine_uid()],
+// "0.0.0.0:1026",
+// Box::new(move |_host, _client_uid, _packet_type, _packet_data| {}),
+// )
+// .unwrap();
+//
+// host.wait_for_exit().unwrap();
+// });
+//
+// let c_thrd_h = thread::spawn(move || {
+// let _client = SecureSocketClient::connect(
+// machine_uid(),
+// "127.0.0.1:1026",
+// Box::new(move |_client, _packet_type, _packet_data| {}),
+// )
+// .unwrap();
+// });
+//
+// h_thrd_h.join().unwrap();
+// c_thrd_h.join().unwrap();
+// }
