@@ -7,29 +7,16 @@ Boundless is yet another keyboard / mouse sharing project. It is mainly implemen
 ##### Getting started
 
 - The server and the client both must know each other.
-- Add each host to each other's allowed hosts via ``--allow-remote-host``
-  - You can obtain the verifying key of each host via ``--verifying-key``
+- On each host run the following commands.
+  - ``--generate-keys``
+    - This will genenerate the private/public keys on this system.
+  - ``--public-key``
+    - This will print the public key of this system.
+  - ``--trust PUBLIC_KEY``
+    - ``PUBLIC_KEY`` is the output of ``--public-key`` of the other system.
 - Start the server via ``--server 0.0.0.0:1504``
 - Start the client via ``--client SERVER_ADDR:1504``
 - Switch input on the host running the server with ``Right Ctrl``
-
-##### Usage
-```
---client CONNECT_SOCKET_ADDR [--enable-audio]
---server LISTEN_SOCKET_ADDR [--enable-audio]
---verifying-key
-  Prints verifying key of this host.
---identifier
-  Prints the identifier of this host.
---allowed-remote-hosts
-  Prints list of remote hosts that are allowed.
---allow-remote-host VERIFYING_KEY
-  Add remote host to the allowed hosts.
---remove-remote-host-by-key VERIFYING_KEY
-  Remove remote host from allowed hosts.
---remove-remote-host-by-iden IDENTIFIER
-  Remove remote host from allowed hosts.
-```
 
 ##### Why is Windows the Server?
 - More robust in capturing input. UInput can be flacky when it come to capturing input. Causing keys to remained pressed for example.

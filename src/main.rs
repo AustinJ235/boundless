@@ -14,6 +14,26 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use strum::{EnumIter, FromRepr};
 
+fn display_usage() {
+	println!("Usage:");
+	println!("  --client SOCKET_ADDR [--enable-audio]");
+	println!("    Start in client mode connecting to provided addr.");
+	println!("    --enable-audio to capture audio");
+	println!("  --server SOCKET_ADDR [--enable-audio]");
+	println!("    Start in server mode listening on the provided addr.");
+	println!("    --enable-audio to listen to audio");
+	println!("  --generate-keys");
+	println!("    Generate keys to be used for host authentication.");
+	println!("  --public-key");
+	println!("    Print public key of this system.");
+	println!("  --trust PUBLIC_KEY");
+	println!("    Trust a public key of another host.");
+	println!("  --distrust PUBLIC_KEY");
+	println!("    Distrust a public key of another host.");
+	println!("  --trusted");
+	println!("    List all public keys trusted on this system.");
+}
+
 fn main() {
 	let mut mode: u8 = 0;
 	let mut args = std::env::args();
@@ -28,10 +48,7 @@ fn main() {
 
 		match arg.as_str() {
 			"--help" => {
-				println!("Usage:");
-				println!("  --client x.x.x.x:x");
-				println!("    or");
-				println!("  --server x.x.x.x:x");
+				display_usage();
 				return;
 			},
 			"--client" => {
@@ -42,14 +59,12 @@ fn main() {
 							Ok(ok) => Some(ok),
 							Err(e) => {
 								println!("Invalid Address: {}", e);
-								println!("Usage:");
-								println!("  --client x.x.x.x:x");
+								println!("Usage: --client SOCKET_ADDR [--enable-audio]");
 								return;
 							},
 						},
 					None => {
-						println!("Usage:");
-						println!("  --client x.x.x.x:x");
+						println!("Usage: --client SOCKET_ADDR [--enable-audio]");
 						return;
 					},
 				};
@@ -62,14 +77,12 @@ fn main() {
 							Ok(ok) => Some(ok),
 							Err(e) => {
 								println!("Invalid Address: {}", e);
-								println!("Usage:");
-								println!("  --server x.x.x.x:x");
+								println!("Usage: SOCKET_ADDR [--enable-audio]");
 								return;
 							},
 						},
 					None => {
-						println!("Usage:");
-						println!("  --server x.x.x.x:x");
+						println!("Usage: SOCKET_ADDR [--enable-audio]");
 						return;
 					},
 				};
@@ -134,7 +147,7 @@ fn main() {
 				let enc_public_key = match args.next() {
 					Some(some) => some,
 					None => {
-						println!("Usage: --trust [public_key]");
+						println!("Usage: --trust PUBLIC_KEY");
 						return;
 					},
 				};
@@ -164,7 +177,7 @@ fn main() {
 				let enc_public_key = match args.next() {
 					Some(some) => some,
 					None => {
-						println!("Usage: --trust [public_key]");
+						println!("Usage: --trust PUBLIC_KEY");
 						return;
 					},
 				};
@@ -212,10 +225,7 @@ fn main() {
 	}
 
 	if mode == 0 {
-		println!("Usage:");
-		println!("  --client x.x.x.x:x");
-		println!("    or");
-		println!("  --server x.x.x.x:x");
+		display_usage();
 		return;
 	}
 

@@ -48,10 +48,6 @@ pub enum PacketType {
 // [0..8]: Message length
 // [8..]: Data
 
-pub fn machine_uid() -> Hash {
-	hash(&machine_uid::get().unwrap().into_bytes())
-}
-
 pub fn hash_slices(inputs: &[&[u8]]) -> Hash {
 	let mut hasher = blake3::Hasher::new();
 
