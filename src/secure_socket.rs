@@ -4,7 +4,7 @@ use chacha20poly1305::aead::{Aead, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use k256::ecdh::EphemeralSecret;
 use k256::{EncodedPoint, PublicKey};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use strum::FromRepr;
 
 pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketHost>, Hash, Vec<u8>) + Send>;
@@ -23,6 +23,7 @@ pub type ClientRecvFn = Box<dyn Fn(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
 pub enum PacketType {
 	ECDH,
 	Verify,
+	Ping,
 	Message,
 }
 
@@ -90,6 +91,7 @@ impl SecureSocketHost {
 		let listen_addr = listen_addr.to_socket_addrs().unwrap().next().unwrap();
 		let socket = UdpSocket::bind(listen_addr.clone())
 			.map_err(|e| format!("Failed to bind socket: {}", e))?;
+		socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
 
 		println!("[Socket-H]: Listening on {:?}", listen_addr);
 
@@ -353,61 +355,80 @@ impl SecureSocketHost {
 
 								let msg = decrypted[8..(8 + msg_len)].to_vec();
 
-								if packet_type == PacketType::Verify {
-									if msg.len() != 64 {
+								match packet_type {
+									PacketType::ECDH => unreachable!(),
+									PacketType::Verify => {
+										if msg.len() != 64 {
+											println!(
+												"[Socket-H]: Rejected connection from {:?}, \
+												 reason: verify length mismatch",
+												addr
+											);
+											drop(client_state);
+											clients.remove(&c_id);
+											continue;
+										}
+
+										let msg_h_b: [u8; 32] = msg[32..64].try_into().unwrap();
+										let msg_h = Hash::from(msg_h_b);
+
+										if msg_h != hash(&msg[0..32]) {
+											println!(
+												"[Socket-H]: Rejected connection from {:?}, \
+												 reason: verify hash mismatch",
+												addr
+											);
+											drop(client_state);
+											clients.remove(&c_id);
+											continue;
+										}
+
+										let mut rand_data = [0_u8; 32];
+										OsRng::fill(&mut OsRng, &mut rand_data);
+										let rand_hash = hash(&rand_data);
+										let mut r_msg = Vec::with_capacity(64);
+										r_msg.extend_from_slice(&rand_data);
+										r_msg.extend_from_slice(rand_hash.as_bytes());
+
+										if let Err(e) = host.send_inner(
+											&mut client_state,
+											PacketType::Verify,
+											r_msg,
+										) {
+											println!(
+												"[Socket-H]: Rejected connection from {:?}, \
+												 reason: verify send error: {}",
+												addr, e
+											);
+											drop(client_state);
+											clients.remove(&c_id);
+											continue;
+										}
+
+										client_state.hs_status = HandshakeStatus::Complete;
 										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: verify length mismatch",
+											"[Socket-H]: Connection established with {:?}",
 											addr
 										);
+									},
+									PacketType::Ping => {
+										if let Err(e) = host.send_inner(
+											&mut client_state,
+											PacketType::Ping,
+											Vec::new(),
+										) {
+											println!(
+												"[Socket-H]: Failed to response ping to {:?}: \
+												 {}",
+												addr, e
+											);
+										}
+									},
+									PacketType::Message => {
 										drop(client_state);
-										clients.remove(&c_id);
-										continue;
-									}
-
-									let msg_h_b: [u8; 32] = msg[32..64].try_into().unwrap();
-									let msg_h = Hash::from(msg_h_b);
-
-									if msg_h != hash(&msg[0..32]) {
-										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: verify hash mismatch",
-											addr
-										);
-										drop(client_state);
-										clients.remove(&c_id);
-										continue;
-									}
-
-									let mut rand_data = [0_u8; 32];
-									OsRng::fill(&mut OsRng, &mut rand_data);
-									let rand_hash = hash(&rand_data);
-									let mut r_msg = Vec::with_capacity(64);
-									r_msg.extend_from_slice(&rand_data);
-									r_msg.extend_from_slice(rand_hash.as_bytes());
-
-									if let Err(e) = host.send_inner(
-										&mut client_state,
-										PacketType::Verify,
-										r_msg,
-									) {
-										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: verify send error: {}",
-											addr, e
-										);
-										drop(client_state);
-										clients.remove(&c_id);
-										continue;
-									}
-
-									client_state.hs_status = HandshakeStatus::Complete;
-									println!(
-										"[Socket-H]: Connection established with {:?}",
-										addr
-									);
-								} else {
-									recv_fn(&host, c_id, msg);
+										drop(clients);
+										recv_fn(&host, c_id, msg);
+									},
 								}
 							},
 							None =>
@@ -418,7 +439,11 @@ impl SecureSocketHost {
 								),
 						}
 					},
-					Err(e) => println!("[Socket-H]: Failed to receive packet: {}", e.kind()),
+					Err(e) =>
+						match e.kind() {
+							std::io::ErrorKind::TimedOut => (),
+							kind => println!("[Socket-H]: Failed to receive packet: {}", kind),
+						},
 				}
 			}
 		}));
@@ -487,6 +512,8 @@ pub struct SecureSocketClient {
 	socket: UdpSocket,
 	state: Mutex<SSCState>,
 	thrd_recv_h: Mutex<Option<JoinHandle<()>>>,
+	ping_cond: Condvar,
+	ping_recv: Mutex<bool>,
 }
 
 struct SSCState {
@@ -652,7 +679,10 @@ impl SecureSocketClient {
 			socket,
 			state: Mutex::new(state),
 			thrd_recv_h: Mutex::new(None),
+			ping_cond: Condvar::new(),
+			ping_recv: Mutex::new(false),
 		});
+
 		let client = client_ret.clone();
 
 		// Verify Send
@@ -699,8 +729,20 @@ impl SecureSocketClient {
 				match client.recv_message(&mut socket_buf) {
 					Ok(ok) =>
 						match ok {
-							Some((_, some)) => recv_fn(&client, some),
-							None => (),
+							Some((packet_type, data)) =>
+								match packet_type {
+									PacketType::ECDH => unreachable!(),
+									PacketType::Verify => {
+										// Probably unreachable? but not panic worthy
+										println!("[Socket-C]: Unexpected Verify!");
+									},
+									PacketType::Ping => {
+										*client.ping_recv.lock() = true;
+										client.ping_cond.notify_one();
+									},
+									PacketType::Message => recv_fn(&client, data),
+								},
+							None => (), // Timed Out
 						},
 					Err(e) => println!("[Socket-C]: Failed to receive packet: {}", e),
 				}
@@ -709,6 +751,20 @@ impl SecureSocketClient {
 
 		println!("[Socket-C]: Connection is established to host.");
 		Ok(client_ret)
+	}
+
+	pub fn ping(&self) -> Result<Duration, String> {
+		let start = Instant::now();
+		self.send_inner(PacketType::Ping, Vec::new())?;
+		let mut ping_recv = self.ping_recv.lock();
+		self.ping_cond.wait_for(&mut ping_recv, Duration::from_millis(1000));
+
+		if !*ping_recv {
+			Err(format!("No response"))
+		} else {
+			*ping_recv = false;
+			Ok(start.elapsed())
+		}
 	}
 
 	fn recv_message(
@@ -846,12 +902,24 @@ fn test() {
 	});
 
 	let c_thrd_h = thread::spawn(move || {
+		let start = Instant::now();
 		let client = SecureSocketClient::connect(
 			c_host_keys,
 			"127.0.0.1:1026",
 			Box::new(move |_client, _packet_data| {}),
 		)
 		.unwrap();
+
+		println!("[Socket-C]: Initialization done in {0:.2} ms", start.elapsed().as_micros() as f32 / 1000.0);
+
+		for _ in 0..10 {
+			match client.ping() {
+				Ok(ok) => println!("[Socket-C]: Ping to Host: {:.2} ms", ok.as_micros() as f32 / 1000.0),
+				Err(e) => println!("[Socket-C]: Ping to Host Failed: {}", e),
+			}
+
+			thread::sleep(Duration::from_millis(rand::random::<u8>() as u64 * 4));
+		}
 
 		client.wait_for_exit().unwrap();
 	});
