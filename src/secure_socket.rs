@@ -390,7 +390,7 @@ impl SecureSocketHost {
 										r_msg.extend_from_slice(&rand_data);
 										r_msg.extend_from_slice(rand_hash.as_bytes());
 
-										if let Err(e) = host.send_inner(
+										if let Err(e) = host.send_internal(
 											&mut client_state,
 											PacketType::Verify,
 											r_msg,
@@ -412,7 +412,7 @@ impl SecureSocketHost {
 										);
 									},
 									PacketType::Ping => {
-										if let Err(e) = host.send_inner(
+										if let Err(e) = host.send_internal(
 											&mut client_state,
 											PacketType::Ping,
 											Vec::new(),
@@ -455,10 +455,10 @@ impl SecureSocketHost {
 		let mut clients = self.clients.lock();
 		let mut client_state =
 			clients.get_mut(&client_id).ok_or(String::from("Client not connected."))?;
-		self.send_inner(&mut client_state, PacketType::Message, data)
+		self.send_internal(&mut client_state, PacketType::Message, data)
 	}
 
-	fn send_inner(
+	fn send_internal(
 		&self,
 		client_state: &mut ClientState,
 		packet_type: PacketType,
@@ -510,13 +510,15 @@ impl SecureSocketHost {
 pub struct SecureSocketClient {
 	host_keys: HostKeys,
 	socket: UdpSocket,
-	state: Mutex<SSCState>,
+	state: Mutex<Option<SSCState>>,
 	thrd_recv_h: Mutex<Option<JoinHandle<()>>>,
 	ping_cond: Condvar,
 	ping_recv: Mutex<bool>,
+	conn_cond: Condvar,
 }
 
 struct SSCState {
+	verified: bool,
 	snd_seq: u64,
 	rcv_seq: u64,
 	nonce_rng_snd: ChaCha20Rng,
@@ -536,226 +538,433 @@ impl SecureSocketClient {
 		socket.connect(host_addr.clone()).unwrap();
 		socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
 
-		println!(
-			"[Socket-C]: Listening on {:?}, Connecting to {:?}",
-			socket.local_addr().unwrap(),
-			host_addr
-		);
-
-		let dh_secret = EphemeralSecret::random(&mut OsRng);
-		let dh_public = EncodedPoint::from(dh_secret.public_key());
-
-		let mut ecdh_data = Vec::with_capacity(64);
-		ecdh_data.push(0);
-		ecdh_data.extend_from_slice(dh_public.as_bytes());
-		ecdh_data[0] = (ecdh_data.len() - 1) as u8;
-
-		let mut c_random = vec![0_u8; 64 - ecdh_data.len()];
-		OsRng::fill(&mut OsRng, c_random.as_mut_slice());
-		ecdh_data.extend_from_slice(&c_random);
-
-		let mut ecdh_buf = Vec::with_capacity(170);
-		ecdh_buf.push(PacketType::ECDH as u8);
-		ecdh_buf.extend_from_slice(host_keys.id().as_bytes());
-		ecdh_buf.push(0);
-		ecdh_buf.append(&mut host_keys.sign_message(&ecdh_data));
-		ecdh_buf[33] = (ecdh_buf.len() - 34) as u8;
-		ecdh_buf.append(&mut ecdh_data);
-
-		let mut socket_buf = vec![0_u8; 65535];
-
-		let state = loop {
-			match socket.send(&ecdh_buf) {
-				Ok(_) =>
-					match socket.recv(&mut socket_buf) {
-						Ok(len) => {
-							if len < 35 {
-								return Err(String::from(
-									"Connection failed: invalid packet length",
-								));
-							}
-
-							match PacketType::from_repr(socket_buf[0]) {
-								Some(PacketType::ECDH) => (),
-								Some(_) | None =>
-									return Err(String::from(
-										"Connection failed: invalid packet type",
-									)),
-							}
-
-							let h_id_b: [u8; 32] = socket_buf[1..33].try_into().unwrap();
-							let h_id = Hash::from(h_id_b);
-							let sig_len = socket_buf[33] as usize;
-							let sig_end = 34 + sig_len;
-
-							if sig_end > len {
-								return Err(String::from(
-									"Connection failed: malformed packet",
-								));
-							}
-
-							let sig_b = &socket_buf[34..sig_end];
-							let msg_end = sig_end + 64;
-
-							if msg_end > len {
-								return Err(String::from(
-									"Connection failed: malformed packet",
-								));
-							}
-
-							let msg = &socket_buf[sig_end..msg_end];
-							host_keys.verify_message(h_id, sig_b, msg).map_err(|e| {
-								format!("Connection failed: message verification error: {}", e)
-							})?;
-							let h_dh_pub_len = msg[0] as usize;
-
-							if h_dh_pub_len > 63 {
-								return Err(String::from(
-									"Connection failed: malformed packet",
-								));
-							}
-
-							let h_dh_pub =
-								PublicKey::from_sec1_bytes(&msg[1..(1 + h_dh_pub_len)])
-									.map_err(|_| {
-										String::from("Connection failed: invalid public key")
-									})?;
-							let h_random = &msg[(1 + h_dh_pub_len)..64];
-							let secret =
-								hash(dh_secret.diffie_hellman(&h_dh_pub).as_bytes().as_slice());
-
-							let nonce_rng_rcv = ChaCha20Rng::from_seed(
-								hash_slices(&[
-									h_id.as_bytes(),
-									h_random,
-									host_keys.id().as_bytes(),
-									&c_random,
-									secret.as_bytes(),
-								])
-								.into(),
-							);
-
-							let nonce_rng_snd = ChaCha20Rng::from_seed(
-								hash_slices(&[
-									host_keys.id().as_bytes(),
-									&c_random,
-									h_id.as_bytes(),
-									h_random,
-									secret.as_bytes(),
-								])
-								.into(),
-							);
-
-							break SSCState {
-								nonce_rng_rcv,
-								nonce_rng_snd,
-								snd_seq: 0,
-								rcv_seq: 0,
-								cipher: ChaCha20Poly1305::new(
-									chacha20poly1305::Key::from_slice(secret.as_bytes()),
-								),
-							};
-						},
-						Err(e) =>
-							match e.kind() {
-								std::io::ErrorKind::TimedOut => {
-									println!("[Socket-C]: No response from server.");
-									thread::sleep(Duration::from_millis(500));
-									continue;
-								},
-								_ =>
-									return Err(format!(
-										"Connection failed: receive error: {}",
-										e.kind()
-									)),
-							},
-					},
-				Err(e) => return Err(format!("Connection failed: send error: {}", e.kind())),
-			}
-		};
-
 		let client_ret = Arc::new(Self {
 			host_keys,
 			socket,
-			state: Mutex::new(state),
+			state: Mutex::new(None),
 			thrd_recv_h: Mutex::new(None),
 			ping_cond: Condvar::new(),
 			ping_recv: Mutex::new(false),
+			conn_cond: Condvar::new(),
 		});
 
 		let client = client_ret.clone();
 
-		// Verify Send
-		let mut rand_data = [0_u8; 32];
-		OsRng::fill(&mut OsRng, &mut rand_data);
-		let rand_hash = hash(&rand_data);
-		let mut r_msg = Vec::with_capacity(64);
-		r_msg.extend_from_slice(&rand_data);
-		r_msg.extend_from_slice(rand_hash.as_bytes());
-		client
-			.send_inner(PacketType::Verify, r_msg)
-			.map_err(|e| format!("Connection Failed: send error: {}", e))?;
-
-		// Verify Receive
-		{
-			let (packet_type, msg) = match client.recv_message(&mut socket_buf) {
-				Ok(ok) =>
-					match ok {
-						Some(some) => some,
-						None =>
-							return Err(String::from("Connection failed: receive timed out")),
-					},
-				Err(e) => return Err(format!("Connection failed: receive error: {}", e)),
-			};
-
-			if packet_type != PacketType::Verify {
-				return Err(String::from("received wrong packet type"));
-			}
-
-			if msg.len() != 64 {
-				return Err(String::from("verify length mismatch"));
-			}
-
-			let msg_h_b: [u8; 32] = msg[32..64].try_into().unwrap();
-			let msg_h = Hash::from(msg_h_b);
-
-			if msg_h != hash(&msg[0..32]) {
-				return Err(String::from("verify hash mismatch"));
-			}
-		}
-
 		*client_ret.thrd_recv_h.lock() = Some(thread::spawn(move || {
+			let mut socket_buf = vec![0_u8; 65535];
+			let mut client_state_set = false;
+
+			struct ECDHData {
+				secret: EphemeralSecret,
+				packet: Vec<u8>,
+				random: Vec<u8>,
+			}
+
+			let mut ecdh_data_op: Option<ECDHData> = None;
+
 			loop {
-				match client.recv_message(&mut socket_buf) {
-					Ok(ok) =>
-						match ok {
-							Some((packet_type, data)) =>
+				if !client_state_set {
+					if ecdh_data_op.is_none() {
+						let dh_secret = EphemeralSecret::random(&mut OsRng);
+						let dh_public = EncodedPoint::from(dh_secret.public_key());
+
+						let mut ecdh_data = Vec::with_capacity(64);
+						ecdh_data.push(0);
+						ecdh_data.extend_from_slice(dh_public.as_bytes());
+						ecdh_data[0] = (ecdh_data.len() - 1) as u8;
+
+						let mut c_random = vec![0_u8; 64 - ecdh_data.len()];
+						OsRng::fill(&mut OsRng, c_random.as_mut_slice());
+						ecdh_data.extend_from_slice(&c_random);
+
+						let mut ecdh_buf = Vec::with_capacity(170);
+						ecdh_buf.push(PacketType::ECDH as u8);
+						ecdh_buf.extend_from_slice(client.host_keys.id().as_bytes());
+						ecdh_buf.push(0);
+						ecdh_buf.append(&mut client.host_keys.sign_message(&ecdh_data));
+						ecdh_buf[33] = (ecdh_buf.len() - 34) as u8;
+						ecdh_buf.append(&mut ecdh_data);
+
+						ecdh_data_op = Some(ECDHData {
+							secret: dh_secret,
+							packet: ecdh_buf,
+							random: c_random,
+						});
+					}
+
+					let ecdh_data = ecdh_data_op.as_ref().unwrap();
+
+					if let Err(e) = client.socket.send(ecdh_data.packet.as_slice()) {
+						println!("[Socket-C]: Failed to send ECDH packet: {}", e.kind());
+						continue;
+					}
+				}
+
+				match client.socket.recv(socket_buf.as_mut_slice()) {
+					Ok(len) => {
+						if len < 1 {
+							continue;
+						}
+
+						match PacketType::from_repr(socket_buf[0]) {
+							Some(packet_type) =>
 								match packet_type {
-									PacketType::ECDH => unreachable!(),
-									PacketType::Verify => {
-										// Probably unreachable? but not panic worthy
-										println!("[Socket-C]: Unexpected Verify!");
+									PacketType::ECDH => {
+										if client_state_set {
+											println!(
+												"[Socket-C]: Received ECDH packet, but \
+												 connection is already established."
+											);
+											continue;
+										}
+
+										let ecdh_data = ecdh_data_op.as_ref().unwrap();
+
+										if len < 34 {
+											println!(
+												"[Socket-C]: Received ECDH packet, but packet \
+												 is truncated."
+											);
+											continue;
+										}
+
+										let h_id_b: [u8; 32] =
+											socket_buf[1..33].try_into().unwrap();
+										let h_id = Hash::from(h_id_b);
+										let sig_len = socket_buf[33] as usize;
+										let sig_end = 34 + sig_len;
+
+										if sig_end > len {
+											println!(
+												"[Socket-C]: Received ECDH packet, but \
+												 signature is truncated."
+											);
+											continue;
+										}
+
+										let sig_b = &socket_buf[34..sig_end];
+										let msg_end = sig_end + 64;
+
+										if msg_end > len {
+											println!(
+												"[Socket-C]: Received ECDH packet, but \
+												 message is truncated."
+											);
+											continue;
+										}
+
+										let msg = &socket_buf[sig_end..msg_end];
+
+										if let Err(_) =
+											client.host_keys.verify_message(h_id, sig_b, msg)
+										{
+											println!(
+												"[Socket-C]: Received ECDH packet, but failed \
+												 to verify authenticity."
+											);
+											continue;
+										}
+
+										let h_dh_pub_len = msg[0] as usize;
+
+										if h_dh_pub_len > 63 {
+											println!(
+												"[Socket-C]: Received ECDH packet, but public \
+												 key is truncated."
+											);
+											continue;
+										}
+
+										let h_dh_pub = match PublicKey::from_sec1_bytes(
+											&msg[1..(1 + h_dh_pub_len)],
+										) {
+											Ok(ok) => ok,
+											Err(_) => {
+												println!(
+													"[Socket-C]: Received ECDH packet, but \
+													 public key is invalid."
+												);
+												continue;
+											},
+										};
+
+										let h_random = &msg[(1 + h_dh_pub_len)..64];
+										let secret = hash(
+											ecdh_data
+												.secret
+												.diffie_hellman(&h_dh_pub)
+												.as_bytes()
+												.as_slice(),
+										);
+
+										let nonce_rng_rcv = ChaCha20Rng::from_seed(
+											hash_slices(&[
+												h_id.as_bytes(),
+												h_random,
+												client.host_keys.id().as_bytes(),
+												ecdh_data.random.as_slice(),
+												secret.as_bytes(),
+											])
+											.into(),
+										);
+
+										let nonce_rng_snd = ChaCha20Rng::from_seed(
+											hash_slices(&[
+												client.host_keys.id().as_bytes(),
+												ecdh_data.random.as_slice(),
+												h_id.as_bytes(),
+												h_random,
+												secret.as_bytes(),
+											])
+											.into(),
+										);
+
+										*client.state.lock() = Some(SSCState {
+											verified: false,
+											nonce_rng_rcv,
+											nonce_rng_snd,
+											snd_seq: 0,
+											rcv_seq: 0,
+											cipher: ChaCha20Poly1305::new(
+												chacha20poly1305::Key::from_slice(
+													secret.as_bytes(),
+												),
+											),
+										});
+
+										client_state_set = true;
+										drop(ecdh_data);
+										ecdh_data_op = None;
+
+										println!(
+											"[Socket-C]: Connection is now pending \
+											 verification."
+										);
+
+										let mut rand_data = [0_u8; 32];
+										OsRng::fill(&mut OsRng, &mut rand_data);
+										let rand_hash = hash(&rand_data);
+										let mut r_msg = Vec::with_capacity(64);
+										r_msg.extend_from_slice(&rand_data);
+										r_msg.extend_from_slice(rand_hash.as_bytes());
+
+										if let Err(e) = client.send_internal(
+											false,
+											PacketType::Verify,
+											r_msg,
+										) {
+											*client.state.lock() = None;
+											client_state_set = false;
+											println!(
+												"[Socket-C]: Connection verification failed, \
+												 failed to send: {}",
+												e
+											);
+										}
 									},
-									PacketType::Ping => {
-										*client.ping_recv.lock() = true;
-										client.ping_cond.notify_one();
+									packet_type => {
+										if !client_state_set {
+											println!(
+												"[Socket-C]: Received {:?} packet, but there \
+												 is no connection.",
+												packet_type
+											);
+											continue;
+										}
+
+										if len < 129 {
+											println!(
+												"[Socket-C]: Received message, but it is \
+												 truncated."
+											);
+											continue;
+										}
+
+										let h_id_b: [u8; 32] =
+											socket_buf[1..33].try_into().unwrap();
+										let h_id = Hash::from(h_id_b);
+
+										if !client.host_keys.is_host_trusted(h_id) {
+											*client.state.lock() = None;
+											client_state_set = false;
+											println!(
+												"[Socket-C]: Connection dropped. Received \
+												 message, but host isn't trusted."
+											);
+											continue;
+										}
+
+										let seq_b: [u8; 8] =
+											socket_buf[33..41].try_into().unwrap();
+										let seq = u64::from_le_bytes(seq_b);
+										let encrypted = &socket_buf[41..len];
+										let mut client_state_gu = client.state.lock();
+										let mut client_state =
+											client_state_gu.as_mut().unwrap();
+
+										if seq > client_state.rcv_seq {
+											println!(
+												"[Socket-C]: Dropped message because it was \
+												 late."
+											);
+											continue;
+										}
+
+										let mut nonce_b = [0_u8; 12];
+										let mut dropped = 0_usize;
+
+										// TODO: Should out of order packets be allowed or
+										// should a window algo exist?
+										while seq < client_state.rcv_seq {
+											client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
+											client_state.rcv_seq += 1;
+											dropped += 1;
+										}
+
+										if dropped > 0 {
+											println!(
+												"[Socket-C]: Detected {} dropped packets from \
+												 host.",
+												dropped
+											);
+										}
+
+										client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
+										client_state.rcv_seq += 1;
+										let nonce = Nonce::from_slice(&nonce_b);
+
+										if dropped != 0 {
+											println!(
+												"[Socket-C]: Detected {} lost packets.",
+												dropped
+											);
+										}
+
+										let decrypted =
+											match client_state.cipher.decrypt(nonce, encrypted)
+											{
+												Ok(ok) => ok,
+												Err(_) => {
+													// TODO: Should a connection be dropped if
+													// it is just one packet?
+													drop(client_state);
+													*client_state_gu = None;
+													client_state_set = false;
+													println!(
+														"[Socket-C]: Connection dropped. \
+														 Failed to decrypt message."
+													);
+													continue;
+												},
+											};
+
+										if decrypted.len() < 72 {
+											drop(client_state);
+											*client_state_gu = None;
+											client_state_set = false;
+											println!(
+												"[Socket-C]: Connection dropped. Decrypted \
+												 message is truncated."
+											);
+											continue;
+										}
+
+										let msg_len_b: [u8; 8] =
+											decrypted[0..8].try_into().unwrap();
+										let msg_len = u64::from_le_bytes(msg_len_b) as usize;
+
+										if msg_len > decrypted.len() + 8 {
+											drop(client_state);
+											*client_state_gu = None;
+											client_state_set = false;
+											println!(
+												"[Socket-C]: Connection dropped. Decrypted \
+												 message is malformed."
+											);
+											continue;
+										}
+
+										let msg = &decrypted[8..(8 + msg_len)];
+
+										match packet_type {
+											PacketType::ECDH => unreachable!(),
+											PacketType::Verify => {
+												if client_state.verified {
+													println!(
+														"[Socket-C]: Received Verify packet, \
+														 but connection is already \
+														 established."
+													);
+													continue;
+												}
+
+												if msg.len() != 64 {
+													*client.state.lock() = None;
+													client_state_set = false;
+													println!(
+														"[Socket-C]: Connection verification \
+														 failed, packet is truncated."
+													);
+													continue;
+												}
+
+												let msg_h_b: [u8; 32] =
+													msg[32..64].try_into().unwrap();
+												let msg_h = Hash::from(msg_h_b);
+
+												if msg_h != hash(&msg[0..32]) {
+													drop(client_state);
+													*client_state_gu = None;
+													client_state_set = false;
+													println!(
+														"[Socket-C]: Connection verification \
+														 failed, hash mismatch."
+													);
+													continue;
+												}
+
+												client_state.verified = true;
+												client.conn_cond.notify_all();
+												println!(
+													"[Socket-C]: Connection is established to \
+													 the host."
+												);
+											},
+											PacketType::Ping => {
+												*client.ping_recv.lock() = true;
+												client.ping_cond.notify_one();
+											},
+											PacketType::Message =>
+												recv_fn(&client, msg.to_vec()),
+										}
 									},
-									PacketType::Message => recv_fn(&client, data),
 								},
-							None => (), // Timed Out
+							None =>
+								println!(
+									"[Socket-C]: Failed to receive packet, reason: invalid \
+									 packet type"
+								),
+						}
+					},
+					Err(e) =>
+						match e.kind() {
+							std::io::ErrorKind::TimedOut => (),
+							kind =>
+								println!(
+									"[Socket-C]: Failed to receive packet, reason: {}",
+									kind
+								),
 						},
-					Err(e) => println!("[Socket-C]: Failed to receive packet: {}", e),
 				}
 			}
 		}));
 
-		println!("[Socket-C]: Connection is established to host.");
 		Ok(client_ret)
 	}
 
 	pub fn ping(&self) -> Result<Duration, String> {
 		let start = Instant::now();
-		self.send_inner(PacketType::Ping, Vec::new())?;
+		self.send_internal(true, PacketType::Ping, Vec::new())?;
 		let mut ping_recv = self.ping_recv.lock();
 		self.ping_cond.wait_for(&mut ping_recv, Duration::from_millis(1000));
 
@@ -767,79 +976,36 @@ impl SecureSocketClient {
 		}
 	}
 
-	fn recv_message(
-		&self,
-		socket_buf: &mut [u8],
-	) -> Result<Option<(PacketType, Vec<u8>)>, String> {
-		let len = match self.socket.recv(socket_buf) {
-			Ok(ok) => ok,
-			Err(e) =>
-				match e.kind() {
-					std::io::ErrorKind::TimedOut => return Ok(None),
-					kind => return Err(format!("receive error: {}", kind)),
-				},
-		};
+	pub fn wait_for_conn(&self) {
+		let mut client_state_gu = self.state.lock();
 
-		if len < 129 {
-			return Err(String::from("packet truncated"));
+		while client_state_gu.is_none() || !client_state_gu.as_ref().unwrap().verified {
+			self.conn_cond.wait(&mut client_state_gu);
 		}
-
-		let packet_type = match PacketType::from_repr(socket_buf[0]) {
-			Some(PacketType::ECDH) | None => return Err(String::from("invalid packet type")),
-			Some(some) => some,
-		};
-
-		let h_id_b: [u8; 32] = socket_buf[1..33].try_into().unwrap();
-		let _h_id = Hash::from(h_id_b);
-		let seq_b: [u8; 8] = socket_buf[33..41].try_into().unwrap();
-		let seq = u64::from_le_bytes(seq_b);
-		let encrypted = &socket_buf[41..len];
-		let mut client_state = self.state.lock();
-
-		if seq > client_state.rcv_seq {
-			return Err(format!("packet late"));
-		}
-
-		let mut nonce_b = [0_u8; 12];
-		let mut dropped = 0_usize;
-
-		while seq < client_state.rcv_seq {
-			client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
-			client_state.rcv_seq += 1;
-			dropped += 1;
-		}
-
-		if dropped > 0 {
-			println!("[Socket-C]: Detected {} dropped packets from host.", dropped);
-		}
-
-		client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
-		let nonce = Nonce::from_slice(&nonce_b);
-		client_state.rcv_seq += 1;
-
-		let decrypted = client_state
-			.cipher
-			.decrypt(nonce, encrypted)
-			.map_err(|e| format!("encryption error: {}", e))?;
-
-		assert!(decrypted.len() >= 72);
-		let msg_len_b: [u8; 8] = decrypted[0..8].try_into().unwrap();
-		let msg_len = u64::from_le_bytes(msg_len_b) as usize;
-
-		if msg_len > decrypted.len() + 8 {
-			return Err(format!("length mismatch"));
-		}
-
-		let msg = decrypted[8..(8 + msg_len)].to_vec();
-		Ok(Some((packet_type, msg)))
 	}
 
 	pub fn send(&self, data: Vec<u8>) -> Result<(), String> {
-		self.send_inner(PacketType::Message, data)
+		self.send_internal(true, PacketType::Message, data)
 	}
 
-	fn send_inner(&self, packet_type: PacketType, mut data: Vec<u8>) -> Result<(), String> {
-		let mut client_state = self.state.lock();
+	fn send_internal(
+		&self,
+		verified: bool,
+		packet_type: PacketType,
+		mut data: Vec<u8>,
+	) -> Result<(), String> {
+		let mut client_state_gu = self.state.lock();
+
+		if client_state_gu.is_none() {
+			return Err(format!("Connection not established"));
+		}
+
+		let mut client_state = client_state_gu.as_mut().unwrap();
+
+		if verified && !client_state.verified {
+			return Err(format!("Connection not verified"));
+		}
+
 		let mut send_buf = Vec::with_capacity(129);
 		send_buf.push(packet_type as u8);
 		send_buf.extend_from_slice(self.host_keys.id().as_bytes());
@@ -910,11 +1076,20 @@ fn test() {
 		)
 		.unwrap();
 
-		println!("[Socket-C]: Initialization done in {0:.2} ms", start.elapsed().as_micros() as f32 / 1000.0);
+		client.wait_for_conn();
+
+		println!(
+			"[Socket-C]: Initialization done in {0:.2} ms",
+			start.elapsed().as_micros() as f32 / 1000.0
+		);
 
 		for _ in 0..10 {
 			match client.ping() {
-				Ok(ok) => println!("[Socket-C]: Ping to Host: {:.2} ms", ok.as_micros() as f32 / 1000.0),
+				Ok(ok) =>
+					println!(
+						"[Socket-C]: Ping to Host: {:.2} ms",
+						ok.as_micros() as f32 / 1000.0
+					),
 				Err(e) => println!("[Socket-C]: Ping to Host Failed: {}", e),
 			}
 
