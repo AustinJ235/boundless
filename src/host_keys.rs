@@ -22,17 +22,13 @@ struct HostKeysFile {
 
 impl HostKeys {
 	pub fn data_file() -> Result<PathBuf, String> {
-		let mut path = dirs::data_local_dir()
-			.ok_or(String::from("Data local direction unavailable on platform."))?;
+		let mut path =
+			dirs::data_local_dir().ok_or(String::from("Data local direction unavailable on platform."))?;
 		path.push("boundless");
 
 		if !path.exists() {
-			create_dir(&path).map_err(|e| {
-				format!(
-					"Data directory doesn't exist. Unable to create directory: {}",
-					e.kind()
-				)
-			})?;
+			create_dir(&path)
+				.map_err(|e| format!("Data directory doesn't exist. Unable to create directory: {}", e.kind()))?;
 		}
 
 		path.push("keys.json");
@@ -49,11 +45,9 @@ impl HostKeys {
 			.open(path)
 			.map_err(|e| format!("Unable to open keys.json: {}", e.kind()))?;
 		let mut data = String::new();
-		handle
-			.read_to_string(&mut data)
-			.map_err(|e| format!("Unable to read keys.json: {}", e.kind()))?;
-		let keys_file: HostKeysFile = serde_json::from_str(&data)
-			.map_err(|e| format!("Unable to parse keys.json: {}", e))?;
+		handle.read_to_string(&mut data).map_err(|e| format!("Unable to read keys.json: {}", e.kind()))?;
+		let keys_file: HostKeysFile =
+			serde_json::from_str(&data).map_err(|e| format!("Unable to parse keys.json: {}", e))?;
 		let private_key_bytes: Vec<u8> = base64::decode(&keys_file.private_key)
 			.map_err(|_| format!("Unable to parse keys.json: Invalid private key"))?;
 		let private_key = SigningKey::from_bytes(&private_key_bytes)
@@ -67,12 +61,10 @@ impl HostKeys {
 		};
 
 		for (i, pk_string) in keys_file.trusted_public_keys.into_iter().enumerate() {
-			let pk_bytes: Vec<u8> = base64::decode(&pk_string).map_err(|_| {
-				format!("Unable to parse keys.json: Public key #{} is invalid", i + 1)
-			})?;
-			let public_key = VerifyingKey::from_sec1_bytes(&pk_bytes).map_err(|_| {
-				format!("Unable to parse keys.json: Public key #{} is invalid", i + 1)
-			})?;
+			let pk_bytes: Vec<u8> = base64::decode(&pk_string)
+				.map_err(|_| format!("Unable to parse keys.json: Public key #{} is invalid", i + 1))?;
+			let public_key = VerifyingKey::from_sec1_bytes(&pk_bytes)
+				.map_err(|_| format!("Unable to parse keys.json: Public key #{} is invalid", i + 1))?;
 			let remote_id = hash(&pk_bytes);
 			host_info.trusted_remote_hosts.insert(remote_id, public_key);
 		}
@@ -104,8 +96,8 @@ impl HostKeys {
 			trusted_public_keys,
 		};
 
-		let mut handle = File::create(path.as_ref())
-			.map_err(|e| format!("Unable to create keys.json: {}", e.kind()))?;
+		let mut handle =
+			File::create(path.as_ref()).map_err(|e| format!("Unable to create keys.json: {}", e.kind()))?;
 		serde_json::to_writer_pretty(&mut handle, &keys_file)
 			.map_err(|e| format!("Failed to write keys.json: {}", e))?;
 		Ok(())
@@ -147,40 +139,32 @@ impl HostKeys {
 		if self.id == id {
 			Some(self.enc_public_key())
 		} else {
-			self.trusted_remote_hosts
-				.get(&id)
-				.map(|pk| base64::encode(pk.to_bytes().as_slice()))
+			self.trusted_remote_hosts.get(&id).map(|pk| base64::encode(pk.to_bytes().as_slice()))
 		}
 	}
 
 	pub fn trust(&mut self, enc_public_key: String) -> Result<(), String> {
-		let pk_bytes: Vec<u8> =
-			base64::decode(&enc_public_key).map_err(|_| format!("Public key is invalid."))?;
-		let public_key = VerifyingKey::from_sec1_bytes(&pk_bytes)
-			.map_err(|_| format!("Public key is invalid."))?;
+		let pk_bytes: Vec<u8> = base64::decode(&enc_public_key).map_err(|_| format!("Public key is invalid."))?;
+		let public_key =
+			VerifyingKey::from_sec1_bytes(&pk_bytes).map_err(|_| format!("Public key is invalid."))?;
 		let remote_id = hash(&pk_bytes);
 		self.trusted_remote_hosts.insert(remote_id.clone(), public_key);
 		Ok(())
 	}
 
 	pub fn trusted(&self) -> Vec<String> {
-		self.trusted_remote_hosts
-			.values()
-			.map(|pk| base64::encode(pk.to_bytes().as_slice()))
-			.collect()
+		self.trusted_remote_hosts.values().map(|pk| base64::encode(pk.to_bytes().as_slice())).collect()
 	}
 
 	pub fn distrust(&mut self, enc_public_key: String) -> Result<bool, String> {
-		let pk_bytes: Vec<u8> =
-			base64::decode(&enc_public_key).map_err(|_| format!("Public key is invalid."))?;
+		let pk_bytes: Vec<u8> = base64::decode(&enc_public_key).map_err(|_| format!("Public key is invalid."))?;
 		let remote_id = hash(&pk_bytes);
 		Ok(self.trusted_remote_hosts.remove(&remote_id).is_some())
 	}
 
 	pub fn verify_message(&self, id: Hash, sig_b: &[u8], message: &[u8]) -> Result<(), String> {
 		let pk = self.public_key_of(id).ok_or(String::from("not trusted"))?;
-		let signature =
-			Signature::from_der(sig_b).map_err(|_| String::from("invalid signature"))?;
+		let signature = Signature::from_der(sig_b).map_err(|_| String::from("invalid signature"))?;
 		pk.verify(message, &signature).map_err(|_| String::from("inauthentic"))
 	}
 

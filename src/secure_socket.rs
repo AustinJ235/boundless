@@ -89,8 +89,7 @@ impl SecureSocketHost {
 		recv_fn: HostRecvFn,
 	) -> Result<Arc<Self>, String> {
 		let listen_addr = listen_addr.to_socket_addrs().unwrap().next().unwrap();
-		let socket = UdpSocket::bind(listen_addr.clone())
-			.map_err(|e| format!("Failed to bind socket: {}", e))?;
+		let socket = UdpSocket::bind(listen_addr.clone()).map_err(|e| format!("Failed to bind socket: {}", e))?;
 		socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
 
 		println!("[Socket-H]: Listening on {:?}", listen_addr);
@@ -119,23 +118,21 @@ impl SecureSocketHost {
 								if packet_type == PacketType::ECDH {
 									if len < 35 {
 										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: packet truncated",
+											"[Socket-H]: Rejected connection from {:?}, reason: packet truncated",
 											addr
 										);
 										continue;
 									}
 
-									let c_id_b: [u8; 32] =
-										(&socket_buf[1..33]).try_into().unwrap();
+									let c_id_b: [u8; 32] = (&socket_buf[1..33]).try_into().unwrap();
 									let c_id = Hash::from(c_id_b);
 									let sig_len = socket_buf[33] as usize;
 									let sig_end = 34 + sig_len;
 
 									if sig_end > len {
 										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: signature truncated",
+											"[Socket-H]: Rejected connection from {:?}, reason: signature \
+											 truncated",
 											addr
 										);
 										continue;
@@ -146,8 +143,7 @@ impl SecureSocketHost {
 
 									if msg_end > len {
 										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: message truncated",
+											"[Socket-H]: Rejected connection from {:?}, reason: message truncated",
 											addr
 										);
 										continue;
@@ -155,14 +151,8 @@ impl SecureSocketHost {
 
 									let msg = &socket_buf[sig_end..msg_end];
 
-									if let Err(e) =
-										host.host_keys.verify_message(c_id, sig_b, msg)
-									{
-										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: {}",
-											addr, e
-										);
+									if let Err(e) = host.host_keys.verify_message(c_id, sig_b, msg) {
+										println!("[Socket-H]: Rejected connection from {:?}, reason: {}", addr, e);
 										continue;
 									}
 
@@ -170,21 +160,19 @@ impl SecureSocketHost {
 
 									if c_dh_pub_len > 63 {
 										println!(
-											"[Socket-H]: Rejected connection from {:?}, \
-											 reason: publick key truncated",
+											"[Socket-H]: Rejected connection from {:?}, reason: publick key \
+											 truncated",
 											addr
 										);
 										continue;
 									}
 
-									let c_dh_pub = match PublicKey::from_sec1_bytes(
-										&msg[1..(1 + c_dh_pub_len)],
-									) {
+									let c_dh_pub = match PublicKey::from_sec1_bytes(&msg[1..(1 + c_dh_pub_len)]) {
 										Ok(ok) => ok,
 										Err(_) => {
 											println!(
-												"[Socket-H]: Rejected connection from {:?}, \
-												 reason: invalid public key",
+												"[Socket-H]: Rejected connection from {:?}, reason: invalid \
+												 public key",
 												addr
 											);
 											continue;
@@ -194,12 +182,7 @@ impl SecureSocketHost {
 									let c_random = &msg[(1 + c_dh_pub_len)..64];
 									let dh_secret = EphemeralSecret::random(&mut OsRng);
 									let dh_public = EncodedPoint::from(dh_secret.public_key());
-									let secret = hash(
-										dh_secret
-											.diffie_hellman(&c_dh_pub)
-											.as_bytes()
-											.as_slice(),
-									);
+									let secret = hash(dh_secret.diffie_hellman(&c_dh_pub).as_bytes().as_slice());
 
 									let mut ecdh_data = Vec::with_capacity(64);
 									ecdh_data.push(0);
@@ -214,16 +197,13 @@ impl SecureSocketHost {
 									ecdh_buf.push(PacketType::ECDH as u8);
 									ecdh_buf.extend_from_slice(host.host_keys.id().as_bytes());
 									ecdh_buf.push(0);
-									ecdh_buf
-										.append(&mut host.host_keys.sign_message(&ecdh_data));
+									ecdh_buf.append(&mut host.host_keys.sign_message(&ecdh_data));
 									ecdh_buf[33] = (ecdh_buf.len() - 34) as u8;
 									ecdh_buf.append(&mut ecdh_data);
 
-									if let Err(e) = host.socket.send_to(&ecdh_buf, addr.clone())
-									{
+									if let Err(e) = host.socket.send_to(&ecdh_buf, addr.clone()) {
 										println!(
-											"[Socket-H]: Rejected connection from {:?}: \
-											 reason: send error: {}",
+											"[Socket-H]: Rejected connection from {:?}: reason: send error: {}",
 											addr,
 											e.kind()
 										);
@@ -259,11 +239,9 @@ impl SecureSocketHost {
 										nonce_rng_rcv,
 										snd_seq: 0,
 										rcv_seq: 0,
-										cipher: ChaCha20Poly1305::new(
-											chacha20poly1305::Key::from_slice(
-												secret.as_bytes(),
-											),
-										),
+										cipher: ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(
+											secret.as_bytes(),
+										)),
 									});
 
 									println!("[Socket-H]: Connection pending with {:?}", addr);
@@ -271,11 +249,7 @@ impl SecureSocketHost {
 								}
 
 								if len < 129 {
-									println!(
-										"[Socket-H]: Rejected packet from {:?}, reason: \
-										 truncated",
-										addr
-									);
+									println!("[Socket-H]: Rejected packet from {:?}, reason: truncated", addr);
 									continue;
 								}
 
@@ -290,8 +264,7 @@ impl SecureSocketHost {
 									Some(some) => some,
 									None => {
 										println!(
-											"[Socket-H]: Rejected packet from {:?}, reason: \
-											 not connected",
+											"[Socket-H]: Rejected packet from {:?}, reason: not connected",
 											addr
 										);
 										continue;
@@ -299,10 +272,7 @@ impl SecureSocketHost {
 								};
 
 								if seq > client_state.rcv_seq {
-									println!(
-										"[Socket-H]: Rejected packet from {:?}, reason: late",
-										addr
-									);
+									println!("[Socket-H]: Rejected packet from {:?}, reason: late", addr);
 									continue;
 								}
 
@@ -317,28 +287,23 @@ impl SecureSocketHost {
 
 								// TODO: window?
 								if dropped > 0 {
-									println!(
-										"[Socket-H]: Detected {} dropped packets from {:?}",
-										dropped, addr
-									);
+									println!("[Socket-H]: Detected {} dropped packets from {:?}", dropped, addr);
 								}
 
 								client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
 								let nonce = Nonce::from_slice(&nonce_b);
 								client_state.rcv_seq += 1;
 
-								let decrypted =
-									match client_state.cipher.decrypt(nonce, encrypted) {
-										Ok(ok) => ok,
-										Err(e) => {
-											println!(
-												"[Socket-H]: Rejected packet from {:?}, \
-												 reason: encryption error: {}",
-												addr, e
-											);
-											continue;
-										},
-									};
+								let decrypted = match client_state.cipher.decrypt(nonce, encrypted) {
+									Ok(ok) => ok,
+									Err(e) => {
+										println!(
+											"[Socket-H]: Rejected packet from {:?}, reason: encryption error: {}",
+											addr, e
+										);
+										continue;
+									},
+								};
 
 								assert!(decrypted.len() >= 72);
 								let msg_len_b: [u8; 8] = decrypted[0..8].try_into().unwrap();
@@ -346,8 +311,7 @@ impl SecureSocketHost {
 
 								if msg_len > decrypted.len() + 8 {
 									println!(
-										"[Socket-H]: Rejected packet from {:?}, reason: \
-										 invalid message length",
+										"[Socket-H]: Rejected packet from {:?}, reason: invalid message length",
 										addr
 									);
 									continue;
@@ -360,8 +324,8 @@ impl SecureSocketHost {
 									PacketType::Verify => {
 										if msg.len() != 64 {
 											println!(
-												"[Socket-H]: Rejected connection from {:?}, \
-												 reason: verify length mismatch",
+												"[Socket-H]: Rejected connection from {:?}, reason: verify \
+												 length mismatch",
 												addr
 											);
 											drop(client_state);
@@ -374,8 +338,8 @@ impl SecureSocketHost {
 
 										if msg_h != hash(&msg[0..32]) {
 											println!(
-												"[Socket-H]: Rejected connection from {:?}, \
-												 reason: verify hash mismatch",
+												"[Socket-H]: Rejected connection from {:?}, reason: verify hash \
+												 mismatch",
 												addr
 											);
 											drop(client_state);
@@ -390,14 +354,12 @@ impl SecureSocketHost {
 										r_msg.extend_from_slice(&rand_data);
 										r_msg.extend_from_slice(rand_hash.as_bytes());
 
-										if let Err(e) = host.send_internal(
-											&mut client_state,
-											PacketType::Verify,
-											r_msg,
-										) {
+										if let Err(e) =
+											host.send_internal(&mut client_state, PacketType::Verify, r_msg)
+										{
 											println!(
-												"[Socket-H]: Rejected connection from {:?}, \
-												 reason: verify send error: {}",
+												"[Socket-H]: Rejected connection from {:?}, reason: verify send \
+												 error: {}",
 												addr, e
 											);
 											drop(client_state);
@@ -406,22 +368,13 @@ impl SecureSocketHost {
 										}
 
 										client_state.hs_status = HandshakeStatus::Complete;
-										println!(
-											"[Socket-H]: Connection established with {:?}",
-											addr
-										);
+										println!("[Socket-H]: Connection established with {:?}", addr);
 									},
 									PacketType::Ping => {
-										if let Err(e) = host.send_internal(
-											&mut client_state,
-											PacketType::Ping,
-											Vec::new(),
-										) {
-											println!(
-												"[Socket-H]: Failed to response ping to {:?}: \
-												 {}",
-												addr, e
-											);
+										if let Err(e) =
+											host.send_internal(&mut client_state, PacketType::Ping, Vec::new())
+										{
+											println!("[Socket-H]: Failed to response ping to {:?}: {}", addr, e);
 										}
 									},
 									PacketType::Message => {
@@ -433,8 +386,7 @@ impl SecureSocketHost {
 							},
 							None =>
 								println!(
-									"[Socket-H]: Rejected packet from {:?}, reason: invalid \
-									 packet type",
+									"[Socket-H]: Rejected packet from {:?}, reason: invalid packet type",
 									addr
 								),
 						}
@@ -453,8 +405,7 @@ impl SecureSocketHost {
 
 	pub fn send(&self, client_id: Hash, data: Vec<u8>) -> Result<(), String> {
 		let mut clients = self.clients.lock();
-		let mut client_state =
-			clients.get_mut(&client_id).ok_or(String::from("Client not connected."))?;
+		let mut client_state = clients.get_mut(&client_id).ok_or(String::from("Client not connected."))?;
 		self.send_internal(&mut client_state, PacketType::Message, data)
 	}
 
@@ -493,8 +444,7 @@ impl SecureSocketHost {
 
 		match self.socket.send_to(&*send_buf, client_state.addr.clone()) {
 			Ok(_) => Ok(()),
-			Err(e) =>
-				Err(format!("Failed to send packet to {:?}: {}", client_state.addr, e.kind())),
+			Err(e) => Err(format!("Failed to send packet to {:?}: {}", client_state.addr, e.kind())),
 		}
 	}
 
@@ -533,8 +483,7 @@ impl SecureSocketClient {
 		recv_fn: ClientRecvFn,
 	) -> Result<Arc<Self>, String> {
 		let host_addr = host_addr.to_socket_addrs().unwrap().next().unwrap();
-		let socket = UdpSocket::bind("0.0.0.0:0")
-			.map_err(|e| format!("Failed to bind socket: {}", e))?;
+		let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind socket: {}", e))?;
 		socket.connect(host_addr.clone()).unwrap();
 		socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
 
@@ -612,8 +561,8 @@ impl SecureSocketClient {
 									PacketType::ECDH => {
 										if client_state_set {
 											println!(
-												"[Socket-C]: Received ECDH packet, but \
-												 connection is already established."
+												"[Socket-C]: Received ECDH packet, but connection is already \
+												 established."
 											);
 											continue;
 										}
@@ -621,23 +570,18 @@ impl SecureSocketClient {
 										let ecdh_data = ecdh_data_op.as_ref().unwrap();
 
 										if len < 34 {
-											println!(
-												"[Socket-C]: Received ECDH packet, but packet \
-												 is truncated."
-											);
+											println!("[Socket-C]: Received ECDH packet, but packet is truncated.");
 											continue;
 										}
 
-										let h_id_b: [u8; 32] =
-											socket_buf[1..33].try_into().unwrap();
+										let h_id_b: [u8; 32] = socket_buf[1..33].try_into().unwrap();
 										let h_id = Hash::from(h_id_b);
 										let sig_len = socket_buf[33] as usize;
 										let sig_end = 34 + sig_len;
 
 										if sig_end > len {
 											println!(
-												"[Socket-C]: Received ECDH packet, but \
-												 signature is truncated."
+												"[Socket-C]: Received ECDH packet, but signature is truncated."
 											);
 											continue;
 										}
@@ -647,20 +591,17 @@ impl SecureSocketClient {
 
 										if msg_end > len {
 											println!(
-												"[Socket-C]: Received ECDH packet, but \
-												 message is truncated."
+												"[Socket-C]: Received ECDH packet, but message is truncated."
 											);
 											continue;
 										}
 
 										let msg = &socket_buf[sig_end..msg_end];
 
-										if let Err(_) =
-											client.host_keys.verify_message(h_id, sig_b, msg)
-										{
+										if let Err(_) = client.host_keys.verify_message(h_id, sig_b, msg) {
 											println!(
-												"[Socket-C]: Received ECDH packet, but failed \
-												 to verify authenticity."
+												"[Socket-C]: Received ECDH packet, but failed to verify \
+												 authenticity."
 											);
 											continue;
 										}
@@ -669,33 +610,26 @@ impl SecureSocketClient {
 
 										if h_dh_pub_len > 63 {
 											println!(
-												"[Socket-C]: Received ECDH packet, but public \
-												 key is truncated."
+												"[Socket-C]: Received ECDH packet, but public key is truncated."
 											);
 											continue;
 										}
 
-										let h_dh_pub = match PublicKey::from_sec1_bytes(
-											&msg[1..(1 + h_dh_pub_len)],
-										) {
-											Ok(ok) => ok,
-											Err(_) => {
-												println!(
-													"[Socket-C]: Received ECDH packet, but \
-													 public key is invalid."
-												);
-												continue;
-											},
-										};
+										let h_dh_pub =
+											match PublicKey::from_sec1_bytes(&msg[1..(1 + h_dh_pub_len)]) {
+												Ok(ok) => ok,
+												Err(_) => {
+													println!(
+														"[Socket-C]: Received ECDH packet, but public key is \
+														 invalid."
+													);
+													continue;
+												},
+											};
 
 										let h_random = &msg[(1 + h_dh_pub_len)..64];
-										let secret = hash(
-											ecdh_data
-												.secret
-												.diffie_hellman(&h_dh_pub)
-												.as_bytes()
-												.as_slice(),
-										);
+										let secret =
+											hash(ecdh_data.secret.diffie_hellman(&h_dh_pub).as_bytes().as_slice());
 
 										let nonce_rng_rcv = ChaCha20Rng::from_seed(
 											hash_slices(&[
@@ -725,21 +659,16 @@ impl SecureSocketClient {
 											nonce_rng_snd,
 											snd_seq: 0,
 											rcv_seq: 0,
-											cipher: ChaCha20Poly1305::new(
-												chacha20poly1305::Key::from_slice(
-													secret.as_bytes(),
-												),
-											),
+											cipher: ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(
+												secret.as_bytes(),
+											)),
 										});
 
 										client_state_set = true;
 										drop(ecdh_data);
 										ecdh_data_op = None;
 
-										println!(
-											"[Socket-C]: Connection is now pending \
-											 verification."
-										);
+										println!("[Socket-C]: Connection is now pending verification.");
 
 										let mut rand_data = [0_u8; 32];
 										OsRng::fill(&mut OsRng, &mut rand_data);
@@ -748,16 +677,11 @@ impl SecureSocketClient {
 										r_msg.extend_from_slice(&rand_data);
 										r_msg.extend_from_slice(rand_hash.as_bytes());
 
-										if let Err(e) = client.send_internal(
-											false,
-											PacketType::Verify,
-											r_msg,
-										) {
+										if let Err(e) = client.send_internal(false, PacketType::Verify, r_msg) {
 											*client.state.lock() = None;
 											client_state_set = false;
 											println!(
-												"[Socket-C]: Connection verification failed, \
-												 failed to send: {}",
+												"[Socket-C]: Connection verification failed, failed to send: {}",
 												e
 											);
 										}
@@ -765,48 +689,38 @@ impl SecureSocketClient {
 									packet_type => {
 										if !client_state_set {
 											println!(
-												"[Socket-C]: Received {:?} packet, but there \
-												 is no connection.",
+												"[Socket-C]: Received {:?} packet, but there is no connection.",
 												packet_type
 											);
 											continue;
 										}
 
 										if len < 129 {
-											println!(
-												"[Socket-C]: Received message, but it is \
-												 truncated."
-											);
+											println!("[Socket-C]: Received message, but it is truncated.");
 											continue;
 										}
 
-										let h_id_b: [u8; 32] =
-											socket_buf[1..33].try_into().unwrap();
+										let h_id_b: [u8; 32] = socket_buf[1..33].try_into().unwrap();
 										let h_id = Hash::from(h_id_b);
 
 										if !client.host_keys.is_host_trusted(h_id) {
 											*client.state.lock() = None;
 											client_state_set = false;
 											println!(
-												"[Socket-C]: Connection dropped. Received \
-												 message, but host isn't trusted."
+												"[Socket-C]: Connection dropped. Received message, but host \
+												 isn't trusted."
 											);
 											continue;
 										}
 
-										let seq_b: [u8; 8] =
-											socket_buf[33..41].try_into().unwrap();
+										let seq_b: [u8; 8] = socket_buf[33..41].try_into().unwrap();
 										let seq = u64::from_le_bytes(seq_b);
 										let encrypted = &socket_buf[41..len];
 										let mut client_state_gu = client.state.lock();
-										let mut client_state =
-											client_state_gu.as_mut().unwrap();
+										let mut client_state = client_state_gu.as_mut().unwrap();
 
 										if seq > client_state.rcv_seq {
-											println!(
-												"[Socket-C]: Dropped message because it was \
-												 late."
-											);
+											println!("[Socket-C]: Dropped message because it was late.");
 											continue;
 										}
 
@@ -823,8 +737,7 @@ impl SecureSocketClient {
 
 										if dropped > 0 {
 											println!(
-												"[Socket-C]: Detected {} dropped packets from \
-												 host.",
+												"[Socket-C]: Detected {} dropped packets from host.",
 												dropped
 											);
 										}
@@ -834,43 +747,35 @@ impl SecureSocketClient {
 										let nonce = Nonce::from_slice(&nonce_b);
 
 										if dropped != 0 {
-											println!(
-												"[Socket-C]: Detected {} lost packets.",
-												dropped
-											);
+											println!("[Socket-C]: Detected {} lost packets.", dropped);
 										}
 
-										let decrypted =
-											match client_state.cipher.decrypt(nonce, encrypted)
-											{
-												Ok(ok) => ok,
-												Err(_) => {
-													// TODO: Should a connection be dropped if
-													// it is just one packet?
-													drop(client_state);
-													*client_state_gu = None;
-													client_state_set = false;
-													println!(
-														"[Socket-C]: Connection dropped. \
-														 Failed to decrypt message."
-													);
-													continue;
-												},
-											};
+										let decrypted = match client_state.cipher.decrypt(nonce, encrypted) {
+											Ok(ok) => ok,
+											Err(_) => {
+												// TODO: Should a connection be dropped if
+												// it is just one packet?
+												drop(client_state);
+												*client_state_gu = None;
+												client_state_set = false;
+												println!(
+													"[Socket-C]: Connection dropped. Failed to decrypt message."
+												);
+												continue;
+											},
+										};
 
 										if decrypted.len() < 72 {
 											drop(client_state);
 											*client_state_gu = None;
 											client_state_set = false;
 											println!(
-												"[Socket-C]: Connection dropped. Decrypted \
-												 message is truncated."
+												"[Socket-C]: Connection dropped. Decrypted message is truncated."
 											);
 											continue;
 										}
 
-										let msg_len_b: [u8; 8] =
-											decrypted[0..8].try_into().unwrap();
+										let msg_len_b: [u8; 8] = decrypted[0..8].try_into().unwrap();
 										let msg_len = u64::from_le_bytes(msg_len_b) as usize;
 
 										if msg_len > decrypted.len() + 8 {
@@ -878,8 +783,7 @@ impl SecureSocketClient {
 											*client_state_gu = None;
 											client_state_set = false;
 											println!(
-												"[Socket-C]: Connection dropped. Decrypted \
-												 message is malformed."
+												"[Socket-C]: Connection dropped. Decrypted message is malformed."
 											);
 											continue;
 										}
@@ -891,9 +795,8 @@ impl SecureSocketClient {
 											PacketType::Verify => {
 												if client_state.verified {
 													println!(
-														"[Socket-C]: Received Verify packet, \
-														 but connection is already \
-														 established."
+														"[Socket-C]: Received Verify packet, but connection is \
+														 already established."
 													);
 													continue;
 												}
@@ -902,14 +805,13 @@ impl SecureSocketClient {
 													*client.state.lock() = None;
 													client_state_set = false;
 													println!(
-														"[Socket-C]: Connection verification \
-														 failed, packet is truncated."
+														"[Socket-C]: Connection verification failed, packet is \
+														 truncated."
 													);
 													continue;
 												}
 
-												let msg_h_b: [u8; 32] =
-													msg[32..64].try_into().unwrap();
+												let msg_h_b: [u8; 32] = msg[32..64].try_into().unwrap();
 												let msg_h = Hash::from(msg_h_b);
 
 												if msg_h != hash(&msg[0..32]) {
@@ -917,43 +819,31 @@ impl SecureSocketClient {
 													*client_state_gu = None;
 													client_state_set = false;
 													println!(
-														"[Socket-C]: Connection verification \
-														 failed, hash mismatch."
+														"[Socket-C]: Connection verification failed, hash \
+														 mismatch."
 													);
 													continue;
 												}
 
 												client_state.verified = true;
 												client.conn_cond.notify_all();
-												println!(
-													"[Socket-C]: Connection is established to \
-													 the host."
-												);
+												println!("[Socket-C]: Connection is established to the host.");
 											},
 											PacketType::Ping => {
 												*client.ping_recv.lock() = true;
 												client.ping_cond.notify_one();
 											},
-											PacketType::Message =>
-												recv_fn(&client, msg.to_vec()),
+											PacketType::Message => recv_fn(&client, msg.to_vec()),
 										}
 									},
 								},
-							None =>
-								println!(
-									"[Socket-C]: Failed to receive packet, reason: invalid \
-									 packet type"
-								),
+							None => println!("[Socket-C]: Failed to receive packet, reason: invalid packet type"),
 						}
 					},
 					Err(e) =>
 						match e.kind() {
 							std::io::ErrorKind::TimedOut => (),
-							kind =>
-								println!(
-									"[Socket-C]: Failed to receive packet, reason: {}",
-									kind
-								),
+							kind => println!("[Socket-C]: Failed to receive packet, reason: {}", kind),
 						},
 				}
 			}
@@ -988,12 +878,7 @@ impl SecureSocketClient {
 		self.send_internal(true, PacketType::Message, data)
 	}
 
-	fn send_internal(
-		&self,
-		verified: bool,
-		packet_type: PacketType,
-		mut data: Vec<u8>,
-	) -> Result<(), String> {
+	fn send_internal(&self, verified: bool, packet_type: PacketType, mut data: Vec<u8>) -> Result<(), String> {
 		let mut client_state_gu = self.state.lock();
 
 		if client_state_gu.is_none() {
@@ -1069,27 +954,17 @@ fn test() {
 
 	let c_thrd_h = thread::spawn(move || {
 		let start = Instant::now();
-		let client = SecureSocketClient::connect(
-			c_host_keys,
-			"127.0.0.1:1026",
-			Box::new(move |_client, _packet_data| {}),
-		)
-		.unwrap();
+		let client =
+			SecureSocketClient::connect(c_host_keys, "127.0.0.1:1026", Box::new(move |_client, _packet_data| {}))
+				.unwrap();
 
 		client.wait_for_conn();
 
-		println!(
-			"[Socket-C]: Initialization done in {0:.2} ms",
-			start.elapsed().as_micros() as f32 / 1000.0
-		);
+		println!("[Socket-C]: Initialization done in {0:.2} ms", start.elapsed().as_micros() as f32 / 1000.0);
 
 		for _ in 0..10 {
 			match client.ping() {
-				Ok(ok) =>
-					println!(
-						"[Socket-C]: Ping to Host: {:.2} ms",
-						ok.as_micros() as f32 / 1000.0
-					),
+				Ok(ok) => println!("[Socket-C]: Ping to Host: {:.2} ms", ok.as_micros() as f32 / 1000.0),
 				Err(e) => println!("[Socket-C]: Ping to Host Failed: {}", e),
 			}
 

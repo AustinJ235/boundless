@@ -93,10 +93,7 @@ impl Client {
 											if let Some(audio_port) = audio_port {
 												let mut audio_socket_addr = connect_to.clone();
 												audio_socket_addr.set_port(audio_port as _);
-												println!(
-													"[Audio]: Connected to {}",
-													audio_socket_addr
-												);
+												println!("[Audio]: Connected to {}", audio_socket_addr);
 												audio_capture_op
 													.as_ref()
 													.unwrap()
@@ -104,10 +101,7 @@ impl Client {
 											}
 										},
 									event => {
-										println!(
-											"Unexpected response from server {:?}.",
-											event
-										);
+										println!("Unexpected response from server {:?}.", event);
 										continue;
 									},
 								},
@@ -124,8 +118,7 @@ impl Client {
 							},
 							e =>
 								return Err(format!(
-									"Unexpected error attempted to receiver from socket: \
-									 {:?}({})",
+									"Unexpected error attempted to receiver from socket: {:?}({})",
 									e, e
 								)),
 						},
@@ -142,20 +135,14 @@ impl Client {
 								io::ErrorKind::WouldBlock => {
 									if last_conn_check.elapsed() > conn_check_interval_max {
 										println!("Connection to server has been lost.");
-										audio_capture_op
-											.as_ref()
-											.map(|c| c.set_socket_addr(None));
+										audio_capture_op.as_ref().map(|c| c.set_socket_addr(None));
 										continue 'connection;
 									}
 
 									continue;
 								},
 								e => {
-									println!(
-										"Unexpected error attempted to receiver from socket: \
-										 {:?}({})",
-										e, e
-									);
+									println!("Unexpected error attempted to receiver from socket: {:?}({})", e, e);
 									audio_capture_op.as_ref().map(|c| c.set_socket_addr(None));
 									continue 'connection;
 								},
@@ -174,14 +161,11 @@ impl Client {
 										},
 										Err(e) => {
 											println!(
-												"Failed to send Hello in response to \
-												 connection check: {}",
+												"Failed to send Hello in response to connection check: {}",
 												e
 											);
 
-											audio_capture_op
-												.as_ref()
-												.map(|c| c.set_socket_addr(None));
+											audio_capture_op.as_ref().map(|c| c.set_socket_addr(None));
 											continue 'connection;
 										},
 									},

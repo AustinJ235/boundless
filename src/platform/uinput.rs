@@ -19,9 +19,7 @@ impl UInputEventReceiver {
 		device_template.set_version(0x1234);
 		device_template.set_bustype(3);
 
-		for enable_event in
-			[EventType::EV_SYN, EventType::EV_KEY, EventType::EV_REL, EventType::EV_MSC]
-		{
+		for enable_event in [EventType::EV_SYN, EventType::EV_KEY, EventType::EV_REL, EventType::EV_MSC] {
 			if let Err(_) = device_template.enable_event_type(&enable_event) {
 				return Err(format!("Failed to enable event type: {:?}", enable_event));
 			}
@@ -67,9 +65,7 @@ impl UInputEventReceiver {
 
 	#[inline(always)]
 	fn write_event<V: Into<i32>>(&self, code: EventCode, val: V) -> Result<(), String> {
-		self.virtual_device
-			.write_event(&event_now(code, val.into()))
-			.map_err(|e| format!("{}", e))
+		self.virtual_device.write_event(&event_now(code, val.into())).map_err(|e| format!("{}", e))
 	}
 
 	#[inline(always)]

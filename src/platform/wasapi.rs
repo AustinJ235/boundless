@@ -11,12 +11,10 @@ use std::time::Duration;
 use std::{ptr, slice};
 use windows::core::Interface;
 use windows::Win32::Media::Audio::{
-	eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-	MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
+	eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+	AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
 };
-use windows::Win32::System::Com::{
-	CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
 
 thread_local! {
 	static COM_INIT: RefCell<bool> = RefCell::new(false);
@@ -32,8 +30,7 @@ impl WASAPIPlayback {
 	pub fn new() -> Result<Box<dyn AudioPlayback + Send>, String> {
 		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
 		let thrd_audio_chunks = audio_chunks.clone();
-		let init_res: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> =
-			Arc::new(Mutex::new(None));
+		let init_res: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> = Arc::new(Mutex::new(None));
 		let init_cond: Arc<Condvar> = Arc::new(Condvar::new());
 		let thrd_init_res = init_res.clone();
 		let thrd_init_cond = init_cond.clone();
@@ -59,29 +56,24 @@ impl WASAPIPlayback {
 				return Ok(());
 			}
 
-			let devices: IMMDeviceEnumerator =
-				match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-					Ok(ok) => ok,
-					Err(e) => {
-						*thrd_init_res.lock() =
-							Some(Err(format!("CoCreateInstance(): {:?}", e)));
-						thrd_init_cond.notify_one();
-						return Ok(());
-					},
-				};
+			let devices: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+				Ok(ok) => ok,
+				Err(e) => {
+					*thrd_init_res.lock() = Some(Err(format!("CoCreateInstance(): {:?}", e)));
+					thrd_init_cond.notify_one();
+					return Ok(());
+				},
+			};
 
-			let default_device: IMMDevice =
-				match devices.GetDefaultAudioEndpoint(eRender, eConsole) {
-					Ok(ok) => ok,
-					Err(e) => {
-						*thrd_init_res.lock() = Some(Err(format!(
-							"IMMDeviceEnumerator::GetDefaultAudioEndpoint(): {:?}",
-							e
-						)));
-						thrd_init_cond.notify_one();
-						return Ok(());
-					},
-				};
+			let default_device: IMMDevice = match devices.GetDefaultAudioEndpoint(eRender, eConsole) {
+				Ok(ok) => ok,
+				Err(e) => {
+					*thrd_init_res.lock() =
+						Some(Err(format!("IMMDeviceEnumerator::GetDefaultAudioEndpoint(): {:?}", e)));
+					thrd_init_cond.notify_one();
+					return Ok(());
+				},
+			};
 
 			let mut mbu_audio_client: MaybeUninit<IAudioClient> = MaybeUninit::zeroed();
 
@@ -100,8 +92,7 @@ impl WASAPIPlayback {
 			let p_mix_format = match audio_client.GetMixFormat() {
 				Ok(ok) => ok,
 				Err(e) => {
-					*thrd_init_res.lock() =
-						Some(Err(format!("IAudioClient::GetMixFormat(): {:?}", e)));
+					*thrd_init_res.lock() = Some(Err(format!("IAudioClient::GetMixFormat(): {:?}", e)));
 					thrd_init_cond.notify_one();
 					return Ok(());
 				},
@@ -118,16 +109,10 @@ impl WASAPIPlayback {
 				..
 			} = ptr::read_unaligned(p_mix_format);
 
-			if let Err(e) = audio_client.Initialize(
-				AUDCLNT_SHAREMODE_SHARED,
-				0,
-				300000,
-				0,
-				p_mix_format,
-				ptr::null(),
-			) {
-				*thrd_init_res.lock() =
-					Some(Err(format!("IAudioClient::Initialize(): {:?}", e)));
+			if let Err(e) =
+				audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 300000, 0, p_mix_format, ptr::null())
+			{
+				*thrd_init_res.lock() = Some(Err(format!("IAudioClient::Initialize(): {:?}", e)));
 				thrd_init_cond.notify_one();
 				return Ok(());
 			}
@@ -135,8 +120,7 @@ impl WASAPIPlayback {
 			let ac_buffer_size = match audio_client.GetBufferSize() {
 				Ok(ok) => ok,
 				Err(e) => {
-					*thrd_init_res.lock() =
-						Some(Err(format!("IAudioClient::GetBufferSize(): {:?}", e)));
+					*thrd_init_res.lock() = Some(Err(format!("IAudioClient::GetBufferSize(): {:?}", e)));
 					thrd_init_cond.notify_one();
 					return Ok(());
 				},
@@ -144,11 +128,10 @@ impl WASAPIPlayback {
 
 			let mut mbu_render_client: MaybeUninit<IAudioRenderClient> = MaybeUninit::zeroed();
 
-			if let Err(e) = audio_client
-				.GetService(&IAudioRenderClient::IID, mbu_render_client.as_mut_ptr() as *mut _)
+			if let Err(e) =
+				audio_client.GetService(&IAudioRenderClient::IID, mbu_render_client.as_mut_ptr() as *mut _)
 			{
-				*thrd_init_res.lock() =
-					Some(Err(format!("IAudioClient::GetService(): {:?}", e)));
+				*thrd_init_res.lock() = Some(Err(format!("IAudioClient::GetService(): {:?}", e)));
 				thrd_init_cond.notify_one();
 				return Ok(());
 			}
@@ -166,8 +149,7 @@ impl WASAPIPlayback {
 				VecDeque::with_capacity(ac_buffer_size as usize * nChannels as usize);
 			let zero_threshold = ac_buffer_size / 4;
 			let block_duration = Duration::from_micros(
-				(((ac_buffer_size / 4) as f64 / nSamplesPerSec as f64) * 1000000.0).trunc()
-					as u64,
+				(((ac_buffer_size / 4) as f64 / nSamplesPerSec as f64) * 1000000.0).trunc() as u64,
 			);
 
 			loop {
@@ -206,8 +188,7 @@ impl WASAPIPlayback {
 				};
 
 				if write_samples_count > 0 {
-					let mut samples_to_write: Vec<f32> =
-						Vec::with_capacity(write_samples_count);
+					let mut samples_to_write: Vec<f32> = Vec::with_capacity(write_samples_count);
 
 					while samples_to_write.len() < write_samples_count - zero_samples {
 						samples_to_write.push(pending_samples.pop_front().unwrap());
@@ -221,18 +202,14 @@ impl WASAPIPlayback {
 					let p_buffer = render_client
 						.GetBuffer(frames_to_write)
 						.map_err(|e| format!("IAudioRenderClient::GetBuffer(): {:?}", e))?;
-					let buffer_bytes = slice::from_raw_parts_mut(
-						p_buffer,
-						frames_to_write as usize * nBlockAlign as usize,
-					);
+					let buffer_bytes =
+						slice::from_raw_parts_mut(p_buffer, frames_to_write as usize * nBlockAlign as usize);
 
 					for (dst_bytes, src) in buffer_bytes
 						.chunks_exact_mut((nBlockAlign / nChannels) as usize)
 						.zip(samples_to_write.into_iter())
 					{
-						for (dst_byte, src_byte) in
-							dst_bytes.into_iter().zip(src.to_le_bytes().into_iter())
-						{
+						for (dst_byte, src_byte) in dst_bytes.into_iter().zip(src.to_le_bytes().into_iter()) {
 							*dst_byte = src_byte;
 						}
 					}
@@ -242,9 +219,7 @@ impl WASAPIPlayback {
 						.map_err(|e| format!("IAudioRenderClient::ReleaseBuffer(): {:?}", e))?;
 
 					if !has_started {
-						audio_client
-							.Start()
-							.map_err(|e| format!("IAudioClient::Start(): {:?}", e))?;
+						audio_client.Start().map_err(|e| format!("IAudioClient::Start(): {:?}", e))?;
 						has_started = true;
 					}
 				}

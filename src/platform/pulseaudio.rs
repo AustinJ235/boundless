@@ -15,8 +15,7 @@ pub struct PulseAudioCapture {
 
 impl PulseAudioCapture {
 	pub fn new() -> Result<Box<dyn AudioCapture>, String> {
-		let ready_result: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> =
-			Arc::new(Mutex::new(None));
+		let ready_result: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> = Arc::new(Mutex::new(None));
 		let ready_cond = Arc::new(Condvar::new());
 		let thrd_ready_result = ready_result.clone();
 		let thrd_ready_cond = ready_cond.clone();
@@ -38,8 +37,7 @@ impl PulseAudioCapture {
 			let socket = match UdpSocket::bind("0.0.0.0:0") {
 				Ok(ok) => ok,
 				Err(e) => {
-					*thrd_ready_result.lock() =
-						Some(Err(format!("Failed to bind audio socket: {}", e)));
+					*thrd_ready_result.lock() = Some(Err(format!("Failed to bind audio socket: {}", e)));
 					thrd_ready_cond.notify_one();
 					return;
 				},
@@ -61,15 +59,13 @@ impl PulseAudioCapture {
 					stream
 				},
 				Err(e) => {
-					*thrd_ready_result.lock() =
-						Some(Err(format!("Failed to create stream: {}", e)));
+					*thrd_ready_result.lock() = Some(Err(format!("Failed to create stream: {}", e)));
 					thrd_ready_cond.notify_one();
 					return;
 				},
 			};
 
-			let buffer_size =
-				(spec.rate as f32 / 1000.0 * 10.0 * spec.channels as f32).trunc() as usize;
+			let buffer_size = (spec.rate as f32 / 1000.0 * 10.0 * spec.channels as f32).trunc() as usize;
 			let mut buffer = vec![0_u8; buffer_size * spec.format.size()];
 			let mut mapped: Vec<f32> = Vec::with_capacity(buffer_size);
 			let mut socket_buf: Vec<u8> = Vec::with_capacity(buffer_size * 4);
@@ -88,26 +84,20 @@ impl PulseAudioCapture {
 						},
 					Format::F32le =>
 						for chunk in buffer.chunks_exact(4) {
-							mapped.push(f32::from_le_bytes([
-								chunk[0], chunk[1], chunk[2], chunk[3],
-							]));
+							mapped.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
 						},
 					Format::F32be =>
 						for chunk in buffer.chunks_exact(4) {
-							mapped.push(f32::from_be_bytes([
-								chunk[0], chunk[1], chunk[2], chunk[3],
-							]));
+							mapped.push(f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
 						},
 					Format::S32le =>
 						for chunk in buffer.chunks_exact(4) {
-							let si32 =
-								i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+							let si32 = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 							mapped.push(si32 as f32 / i32::max_value() as f32);
 						},
 					Format::S32be =>
 						for chunk in buffer.chunks_exact(4) {
-							let si32 =
-								i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+							let si32 = i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
 							mapped.push(si32 as f32 / i32::max_value() as f32);
 						},
 					_ => unimplemented!(),

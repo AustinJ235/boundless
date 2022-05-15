@@ -41,8 +41,7 @@ impl Server {
 				Err(e) => return Err(format!("Failed to initiate capture: {}", e)),
 			};
 
-			let socket = UdpSocket::bind(bind_to)
-				.map_err(|e| format!("Failed to bind socket: {}", e))?;
+			let socket = UdpSocket::bind(bind_to).map_err(|e| format!("Failed to bind socket: {}", e))?;
 			socket
 				.set_read_timeout(Some(Duration::from_millis(500)))
 				.map_err(|e| format!("Failed to set read timeout: {}", e))?;
@@ -69,10 +68,9 @@ impl Server {
 					}
 				};
 
-				let audio = audio_res
-					.map_err(|e| format!("Failed to initiate audio playback: {}", e))?;
-				let audio_socket = UdpSocket::bind("0.0.0.0:0")
-					.map_err(|e| format!("Failed to bind audio socket: {}", e))?;
+				let audio = audio_res.map_err(|e| format!("Failed to initiate audio playback: {}", e))?;
+				let audio_socket =
+					UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind audio socket: {}", e))?;
 				let audio_port = audio_socket
 					.local_addr()
 					.map_err(|e| format!("Failed to obtain port for audio socket: {}", e))?
@@ -99,8 +97,7 @@ impl Server {
 									Ok(overwritten) =>
 										if overwritten {
 											println!(
-												"[Audio]: Incoming data overwrote data. \
-												 Playback buffer is full."
+												"[Audio]: Incoming data overwrote data. Playback buffer is full."
 											);
 										},
 									Err(_) => {
@@ -162,20 +159,14 @@ impl Server {
 												},
 												Err(e) =>
 													println!(
-														"Client attempted to connect, but \
-														 didn't respond back: {}",
+														"Client attempted to connect, but didn't respond back: {}",
 														e
 													),
 											}
 										},
-										_ =>
-											println!(
-												"Client attempted to connect, but didn't say \
-												 hello."
-											),
+										_ => println!("Client attempted to connect, but didn't say hello."),
 									},
-								None =>
-									println!("Client attempted to connect, but sent gibberish."),
+								None => println!("Client attempted to connect, but sent gibberish."),
 							},
 						Err(e) =>
 							match e.kind() {
@@ -188,9 +179,7 @@ impl Server {
 						let event_b = KBMSEvent::ConnectionCheck.encode(seq);
 						seq += 1;
 
-						if let Err(e) =
-							socket.send_to(&event_b, current_client.as_ref().unwrap())
-						{
+						if let Err(e) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
 							println!("Failed to send connection check to client: {}", e);
 							current_client = None;
 							continue;
@@ -213,29 +202,21 @@ impl Server {
 												},
 												_ => {
 													println!(
-														"Client failed connection check. \
-														 Received wrong response."
+														"Client failed connection check. Received wrong response."
 													);
 													current_client = None;
 													continue 'client_check;
 												},
 											},
 										None => {
-											println!(
-												"Client failed connection check. Failed to \
-												 decode event."
-											);
+											println!("Client failed connection check. Failed to decode event.");
 											current_client = None;
 											continue 'client_check;
 										},
 									}
 								},
 								Err(e) => {
-									println!(
-										"Client failed connection check. Socket receive \
-										 error: {}",
-										e
-									);
+									println!("Client failed connection check. Socket receive error: {}", e);
 									current_client = None;
 									continue 'client_check;
 								},
@@ -243,8 +224,7 @@ impl Server {
 						}
 					}
 
-					let event_b = match capture.event_queue().pop_for(queue_pop_timeout.clone())
-					{
+					let event_b = match capture.event_queue().pop_for(queue_pop_timeout.clone()) {
 						Some(event) => {
 							let bytes = event.encode(seq);
 							seq += 1;
@@ -254,9 +234,7 @@ impl Server {
 					};
 
 					if let Err(_) = socket.send_to(&event_b, current_client.as_ref().unwrap()) {
-						println!(
-							"Failed to send message to client. Looking for new connection."
-						);
+						println!("Failed to send message to client. Looking for new connection.");
 						current_client = None;
 						continue;
 					}

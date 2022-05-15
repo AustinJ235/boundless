@@ -362,9 +362,8 @@ impl KBMSEvent {
 		}
 
 		let seq = u128::from_le_bytes([
-			bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-			bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
-			bytes[15],
+			bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+			bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
 		]);
 
 		let event = match bytes[16] {
@@ -455,11 +454,10 @@ impl KBMSEvent {
 					return None;
 				}
 
-				let audio_port =
-					match u32::from_le_bytes([bytes[17], bytes[18], bytes[19], bytes[20]]) {
-						0 => None,
-						p => Some(p),
-					};
+				let audio_port = match u32::from_le_bytes([bytes[17], bytes[18], bytes[19], bytes[20]]) {
+					0 => None,
+					p => Some(p),
+				};
 
 				KBMSEvent::ServerInfo {
 					audio_port,

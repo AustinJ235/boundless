@@ -15,25 +15,22 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-	VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10,
-	VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT,
-	VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_NEXT, VK_OEM_1, VK_OEM_2, VK_OEM_4,
-	VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS,
-	VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN,
-	VK_SCROLL, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
+	VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10, VK_F11, VK_F12, VK_F2,
+	VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU,
+	VK_LSHIFT, VK_LWIN, VK_NEXT, VK_OEM_1, VK_OEM_2, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA,
+	VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PAUSE, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU,
+	VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::{
-	GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
-	RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_NOLEGACY, RID_DEVICE_INFO_TYPE, RID_INPUT,
-	RIM_TYPEMOUSE,
+	GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+	RIDEV_INPUTSINK, RIDEV_NOLEGACY, RID_DEVICE_INFO_TYPE, RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, RegisterClassExW,
-	SetWindowsHookExW, UnhookWindowsHookEx, HCURSOR, HHOOK, HICON, HMENU, KBDLLHOOKSTRUCT, MSG,
-	MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
-	WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-	WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW,
-	WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+	CallNextHookEx, CreateWindowExW, DefWindowProcW, GetMessageW, RegisterClassExW, SetWindowsHookExW,
+	UnhookWindowsHookEx, HCURSOR, HHOOK, HICON, HMENU, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
+	WH_MOUSE_LL, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+	WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+	WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 	WS_OVERLAPPED,
 };
 
@@ -58,13 +55,11 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 			WM_MOUSEMOVE => None,
 			WM_MOUSEWHEEL =>
 				Some(KBMSEvent::MSScrollV(
-					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16
-						/ 120,
+					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16 / 120,
 				)),
 			WM_MOUSEHWHEEL =>
 				Some(KBMSEvent::MSScrollH(
-					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16
-						/ 120,
+					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16 / 120,
 				)),
 			unknown => {
 				println!("Unknown WPARAM({}) for MOUSE_LL", unknown);
@@ -180,20 +175,14 @@ fn vkcode_to_kbkey(code: u32) -> Option<KBKey> {
 	})
 }
 
-unsafe extern "system" fn keyboard_ll_hook(
-	code: i32,
-	wparam: WPARAM,
-	lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn keyboard_ll_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 	if code >= 0 {
 		let info = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 		let pass_events = PASS_EVENTS.load(atomic::Ordering::SeqCst);
 
 		let event_op: Option<KBMSEvent> = match wparam.0 as u32 {
-			WM_KEYDOWN | WM_SYSKEYDOWN =>
-				vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBPress(v)),
-			WM_KEYUP | WM_SYSKEYUP =>
-				vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBRelease(v)),
+			WM_KEYDOWN | WM_SYSKEYDOWN => vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBPress(v)),
+			WM_KEYUP | WM_SYSKEYUP => vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBRelease(v)),
 			unknown => {
 				println!("Unknown WPARAM({}) for KEYBOARD_LL", unknown);
 				None
@@ -233,12 +222,7 @@ unsafe extern "system" fn keyboard_ll_hook(
 	CallNextHookEx(HHOOK(HOOK_KEYBOARD_LL.load(atomic::Ordering::SeqCst)), code, wparam, lparam)
 }
 
-unsafe extern "system" fn wnd_proc_callback(
-	window: HWND,
-	msg: u32,
-	wparam: WPARAM,
-	lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wnd_proc_callback(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 	DefWindowProcW(window, msg, wparam, lparam)
 }
 
@@ -287,24 +271,19 @@ impl WindowsCapture {
 			// SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_VISIBLE | WS_POPUP).0 as isize);
 
 			if hwnd.0 == 0 {
-				*thread_result.lock() =
-					Some(Err(String::from("Failed to create event target window.")));
+				*thread_result.lock() = Some(Err(String::from("Failed to create event target window.")));
 				thread_result_ready.notify_one();
 				return;
 			}
 
-			let hook_mouse_ll = match SetWindowsHookExW(
-				WH_MOUSE_LL,
-				Some(mouse_ll_hook),
-				HINSTANCE::default(),
-				0,
-			) {
+			let hook_mouse_ll = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_hook), HINSTANCE::default(), 0)
+			{
 				Ok(ok) =>
 					match ok.is_invalid() {
 						true => {
 							*thread_result.lock() = Some(Err(String::from(
-								"SetWindowsHookExW for WH_MOUSE_LL was successful, but \
-								 returned handle is invalid.",
+								"SetWindowsHookExW for WH_MOUSE_LL was successful, but returned handle is \
+								 invalid.",
 							)));
 							thread_result_ready.notify_one();
 							return;
@@ -312,44 +291,36 @@ impl WindowsCapture {
 						false => ok,
 					},
 				Err(e) => {
-					*thread_result.lock() = Some(Err(format!(
-						"SetWindowsHookExW for WH_MOUSE_LL return an error: {}",
-						e
-					)));
+					*thread_result.lock() =
+						Some(Err(format!("SetWindowsHookExW for WH_MOUSE_LL return an error: {}", e)));
 					thread_result_ready.notify_one();
 					return;
 				},
 			};
 
-			let hook_keyboard_ll = match SetWindowsHookExW(
-				WH_KEYBOARD_LL,
-				Some(keyboard_ll_hook),
-				HINSTANCE::default(),
-				0,
-			) {
-				Ok(ok) =>
-					match ok.is_invalid() {
-						true => {
-							*thread_result.lock() = Some(Err(String::from(
-								"SetWindowsHookExW for WH_KEYBOARD_LL was successful, but \
-								 returned handle is invalid.",
-							)));
-							thread_result_ready.notify_one();
-							UnhookWindowsHookEx(hook_mouse_ll);
-							return;
+			let hook_keyboard_ll =
+				match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_hook), HINSTANCE::default(), 0) {
+					Ok(ok) =>
+						match ok.is_invalid() {
+							true => {
+								*thread_result.lock() = Some(Err(String::from(
+									"SetWindowsHookExW for WH_KEYBOARD_LL was successful, but returned handle is \
+									 invalid.",
+								)));
+								thread_result_ready.notify_one();
+								UnhookWindowsHookEx(hook_mouse_ll);
+								return;
+							},
+							false => ok,
 						},
-						false => ok,
+					Err(e) => {
+						*thread_result.lock() =
+							Some(Err(format!("SetWindowsHookExW for WH_KEYBOARD_LL return an error: {}", e)));
+						thread_result_ready.notify_one();
+						UnhookWindowsHookEx(hook_mouse_ll);
+						return;
 					},
-				Err(e) => {
-					*thread_result.lock() = Some(Err(format!(
-						"SetWindowsHookExW for WH_KEYBOARD_LL return an error: {}",
-						e
-					)));
-					thread_result_ready.notify_one();
-					UnhookWindowsHookEx(hook_mouse_ll);
-					return;
-				},
-			};
+				};
 
 			HOOK_MOUSE_LL.store(hook_mouse_ll.0, atomic::Ordering::SeqCst);
 			HOOK_KEYBOARD_LL.store(hook_keyboard_ll.0, atomic::Ordering::SeqCst);
@@ -361,14 +332,10 @@ impl WindowsCapture {
 				hwndTarget: hwnd,
 			}];
 
-			if let Err(e) = RegisterRawInputDevices(
-				&raw_devices,
-				std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-			)
-			.ok()
+			if let Err(e) =
+				RegisterRawInputDevices(&raw_devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32).ok()
 			{
-				*thread_result.lock() =
-					Some(Err(format!("Failed to register raw input devices: {}", e)));
+				*thread_result.lock() = Some(Err(format!("Failed to register raw input devices: {}", e)));
 				thread_result_ready.notify_one();
 				UnhookWindowsHookEx(hook_mouse_ll);
 				UnhookWindowsHookEx(hook_keyboard_ll);
@@ -402,7 +369,7 @@ impl WindowsCapture {
 								}
 
 								match RID_DEVICE_INFO_TYPE(data.header.dwType) {
-									RIM_TYPEMOUSE => {
+									RIM_TYPEMOUSE =>
 										if !PASS_EVENTS.load(atomic::Ordering::SeqCst) {
 											let mouse_data = data.data.mouse;
 
@@ -414,8 +381,7 @@ impl WindowsCapture {
 													mouse_data.lLastY,
 												));
 											}
-										}
-									},
+										},
 									ty => println!("Uknown raw input type: {:?}", ty),
 								}
 							},
