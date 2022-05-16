@@ -18,6 +18,10 @@ use strum::FromRepr;
 pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketHost>, Hash, Vec<u8>) + Send>;
 pub type ClientRecvFn = Box<dyn Fn(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
 
+const PING_INTERVAL: Duration = Duration::from_millis(3000);
+const PING_DISCONNECT: Duration = Duration::from_millis(4000);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1000);
+
 #[derive(FromRepr, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum PacketType {
@@ -74,6 +78,7 @@ struct ClientState {
 	rcv_seq: u64,
 	nonce_rng_snd: ChaCha20Rng,
 	nonce_rng_rcv: ChaCha20Rng,
+	ping_recv: Instant,
 }
 
 #[derive(PartialEq, Eq)]
@@ -90,7 +95,7 @@ impl SecureSocketHost {
 	) -> Result<Arc<Self>, String> {
 		let listen_addr = listen_addr.to_socket_addrs().unwrap().next().unwrap();
 		let socket = UdpSocket::bind(listen_addr.clone()).map_err(|e| format!("Failed to bind socket: {}", e))?;
-		socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+		socket.set_read_timeout(Some(Duration::from_millis(350))).unwrap();
 
 		println!("[Socket-H]: Listening on {:?}", listen_addr);
 
@@ -242,6 +247,7 @@ impl SecureSocketHost {
 										cipher: ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(
 											secret.as_bytes(),
 										)),
+										ping_recv: Instant::now(),
 									});
 
 									println!("[Socket-H]: Connection pending with {:?}", addr);
@@ -368,6 +374,7 @@ impl SecureSocketHost {
 										}
 
 										client_state.hs_status = HandshakeStatus::Complete;
+										client_state.ping_recv = Instant::now();
 										println!("[Socket-H]: Connection established with {:?}", addr);
 									},
 									PacketType::Ping => {
@@ -375,7 +382,10 @@ impl SecureSocketHost {
 											host.send_internal(&mut client_state, PacketType::Ping, Vec::new())
 										{
 											println!("[Socket-H]: Failed to response ping to {:?}: {}", addr, e);
+											continue;
 										}
+
+										client_state.ping_recv = Instant::now();
 									},
 									PacketType::Message => {
 										drop(client_state);
@@ -393,7 +403,33 @@ impl SecureSocketHost {
 					},
 					Err(e) =>
 						match e.kind() {
-							std::io::ErrorKind::TimedOut => (),
+							std::io::ErrorKind::TimedOut => {
+								host.clients.lock().retain(|_, client_state| {
+									match client_state.hs_status {
+										HandshakeStatus::Pending =>
+											if client_state.ping_recv.elapsed() > HANDSHAKE_TIMEOUT {
+												println!(
+													"[Socket-H]: Connection lost to {:?}: handshake timed out",
+													client_state.addr
+												);
+												false
+											} else {
+												true
+											},
+										HandshakeStatus::Complete =>
+											if client_state.ping_recv.elapsed() > PING_DISCONNECT {
+												println!(
+													"[Socket-H]: Connection lost to {:?}: no ping received in \
+													 timeframe.",
+													client_state.addr
+												);
+												false
+											} else {
+												true
+											},
+									}
+								});
+							},
 							kind => println!("[Socket-H]: Failed to receive packet: {}", kind),
 						},
 				}
@@ -462,8 +498,6 @@ pub struct SecureSocketClient {
 	socket: UdpSocket,
 	state: Mutex<Option<SSCState>>,
 	thrd_recv_h: Mutex<Option<JoinHandle<()>>>,
-	ping_cond: Condvar,
-	ping_recv: Mutex<bool>,
 	conn_cond: Condvar,
 }
 
@@ -485,31 +519,32 @@ impl SecureSocketClient {
 		let host_addr = host_addr.to_socket_addrs().unwrap().next().unwrap();
 		let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind socket: {}", e))?;
 		socket.connect(host_addr.clone()).unwrap();
-		socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+		socket.set_read_timeout(Some(Duration::from_millis(350))).unwrap();
 
 		let client_ret = Arc::new(Self {
 			host_keys,
 			socket,
 			state: Mutex::new(None),
 			thrd_recv_h: Mutex::new(None),
-			ping_cond: Condvar::new(),
-			ping_recv: Mutex::new(false),
 			conn_cond: Condvar::new(),
 		});
 
 		let client = client_ret.clone();
 
 		*client_ret.thrd_recv_h.lock() = Some(thread::spawn(move || {
-			let mut socket_buf = vec![0_u8; 65535];
-			let mut client_state_set = false;
-
 			struct ECDHData {
 				secret: EphemeralSecret,
 				packet: Vec<u8>,
 				random: Vec<u8>,
 			}
 
+			let mut socket_buf = vec![0_u8; 65535];
+			let mut client_state_set = false;
+			let mut client_state_verified = false;
 			let mut ecdh_data_op: Option<ECDHData> = None;
+			let mut ping_recv = Instant::now();
+			let mut ping_sent = Instant::now();
+			let mut ping_pending = false;
 
 			loop {
 				if !client_state_set {
@@ -546,6 +581,27 @@ impl SecureSocketClient {
 					if let Err(e) = client.socket.send(ecdh_data.packet.as_slice()) {
 						println!("[Socket-C]: Failed to send ECDH packet: {}", e.kind());
 						continue;
+					}
+				} else if client_state_verified {
+					if ping_recv.elapsed() > PING_INTERVAL {
+						if ping_recv.elapsed() > PING_DISCONNECT {
+							*client.state.lock() = None;
+							client_state_set = false;
+							client_state_verified = false;
+							println!("[Socket-C]: Connection lost: failed to receive ping response from host.");
+						}
+
+						if !ping_pending {
+							ping_sent = Instant::now();
+							ping_pending = true;
+
+							if let Err(e) = client.send_internal(true, PacketType::Ping, Vec::new()) {
+								*client.state.lock() = None;
+								client_state_set = false;
+								client_state_verified = false;
+								println!("[Socket-C]: Connection lost: failed to send ping to host: {}", e);
+							}
+						}
 					}
 				}
 
@@ -665,6 +721,7 @@ impl SecureSocketClient {
 										});
 
 										client_state_set = true;
+										client_state_verified = false;
 										drop(ecdh_data);
 										ecdh_data_op = None;
 
@@ -680,6 +737,8 @@ impl SecureSocketClient {
 										if let Err(e) = client.send_internal(false, PacketType::Verify, r_msg) {
 											*client.state.lock() = None;
 											client_state_set = false;
+											client_state_verified = false;
+
 											println!(
 												"[Socket-C]: Connection verification failed, failed to send: {}",
 												e
@@ -706,6 +765,8 @@ impl SecureSocketClient {
 										if !client.host_keys.is_host_trusted(h_id) {
 											*client.state.lock() = None;
 											client_state_set = false;
+											client_state_verified = false;
+
 											println!(
 												"[Socket-C]: Connection dropped. Received message, but host \
 												 isn't trusted."
@@ -758,6 +819,8 @@ impl SecureSocketClient {
 												drop(client_state);
 												*client_state_gu = None;
 												client_state_set = false;
+												client_state_verified = false;
+
 												println!(
 													"[Socket-C]: Connection dropped. Failed to decrypt message."
 												);
@@ -769,6 +832,8 @@ impl SecureSocketClient {
 											drop(client_state);
 											*client_state_gu = None;
 											client_state_set = false;
+											client_state_verified = false;
+
 											println!(
 												"[Socket-C]: Connection dropped. Decrypted message is truncated."
 											);
@@ -782,6 +847,8 @@ impl SecureSocketClient {
 											drop(client_state);
 											*client_state_gu = None;
 											client_state_set = false;
+											client_state_verified = false;
+
 											println!(
 												"[Socket-C]: Connection dropped. Decrypted message is malformed."
 											);
@@ -804,6 +871,8 @@ impl SecureSocketClient {
 												if msg.len() != 64 {
 													*client.state.lock() = None;
 													client_state_set = false;
+													client_state_verified = false;
+
 													println!(
 														"[Socket-C]: Connection verification failed, packet is \
 														 truncated."
@@ -818,6 +887,8 @@ impl SecureSocketClient {
 													drop(client_state);
 													*client_state_gu = None;
 													client_state_set = false;
+													client_state_verified = false;
+
 													println!(
 														"[Socket-C]: Connection verification failed, hash \
 														 mismatch."
@@ -826,12 +897,17 @@ impl SecureSocketClient {
 												}
 
 												client_state.verified = true;
+												client_state_verified = true;
 												client.conn_cond.notify_all();
 												println!("[Socket-C]: Connection is established to the host.");
 											},
 											PacketType::Ping => {
-												*client.ping_recv.lock() = true;
-												client.ping_cond.notify_one();
+												ping_recv = Instant::now();
+												ping_pending = false;
+												println!(
+													"[Socket-C]: Ping to host: {:.2} ms",
+													ping_sent.elapsed().as_micros() as f32 / 1000.0
+												);
 											},
 											PacketType::Message => recv_fn(&client, msg.to_vec()),
 										}
@@ -842,7 +918,10 @@ impl SecureSocketClient {
 					},
 					Err(e) =>
 						match e.kind() {
-							std::io::ErrorKind::TimedOut => (),
+							std::io::ErrorKind::TimedOut =>
+								if !client_state_set {
+									thread::sleep(Duration::from_secs(1));
+								},
 							kind => println!("[Socket-C]: Failed to receive packet, reason: {}", kind),
 						},
 				}
@@ -850,20 +929,6 @@ impl SecureSocketClient {
 		}));
 
 		Ok(client_ret)
-	}
-
-	pub fn ping(&self) -> Result<Duration, String> {
-		let start = Instant::now();
-		self.send_internal(true, PacketType::Ping, Vec::new())?;
-		let mut ping_recv = self.ping_recv.lock();
-		self.ping_cond.wait_for(&mut ping_recv, Duration::from_millis(1000));
-
-		if !*ping_recv {
-			Err(format!("No response"))
-		} else {
-			*ping_recv = false;
-			Ok(start.elapsed())
-		}
 	}
 
 	pub fn wait_for_conn(&self) {
@@ -953,24 +1018,11 @@ fn test() {
 	});
 
 	let c_thrd_h = thread::spawn(move || {
-		let start = Instant::now();
 		let client =
 			SecureSocketClient::connect(c_host_keys, "127.0.0.1:1026", Box::new(move |_client, _packet_data| {}))
 				.unwrap();
 
 		client.wait_for_conn();
-
-		println!("[Socket-C]: Initialization done in {0:.2} ms", start.elapsed().as_micros() as f32 / 1000.0);
-
-		for _ in 0..10 {
-			match client.ping() {
-				Ok(ok) => println!("[Socket-C]: Ping to Host: {:.2} ms", ok.as_micros() as f32 / 1000.0),
-				Err(e) => println!("[Socket-C]: Ping to Host Failed: {}", e),
-			}
-
-			thread::sleep(Duration::from_millis(rand::random::<u8>() as u64 * 4));
-		}
-
 		client.wait_for_exit().unwrap();
 	});
 
