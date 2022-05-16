@@ -18,10 +18,18 @@ use strum::FromRepr;
 pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketHost>, Hash, Vec<u8>) + Send>;
 pub type ClientRecvFn = Box<dyn Fn(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
 
+// How often the clients sends pings.
 const PING_INTERVAL: Duration = Duration::from_millis(3000);
+// Time between the last ping received and when to disconnect client due to the connection being idle. Must be
+// higher than PING_INTERVAL.
 const PING_DISCONNECT: Duration = Duration::from_millis(4000);
+// Time between start of handshake and when to cancel handshake due to the client not responding.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1000);
-const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(30); // TODO: Increase to something reasonable
+// How often to renegotiate secrets. Time between last handshake and when to disconnect the client due to
+// it not renegotiating. Must be higher than HANDSHAKE_INTERVAL.
+// TODO: Increase to something reasonable
+const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(30);
+const HANDSHAKE_MAX_ALLOWED: Duration = Duration::from_secs(32);
 
 #[derive(FromRepr, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -80,6 +88,7 @@ struct ClientState {
 	nonce_rng_snd: ChaCha20Rng,
 	nonce_rng_rcv: ChaCha20Rng,
 	ping_recv: Instant,
+	last_handshake: Instant,
 }
 
 #[derive(PartialEq, Eq)]
@@ -160,6 +169,7 @@ impl SecureSocketHost {
 										rcv_seq: 0,
 										cipher,
 										ping_recv: Instant::now(),
+										last_handshake: Instant::now(),
 									});
 
 									println!("[Socket-H]: Connection pending with {:?}", addr);
@@ -287,6 +297,7 @@ impl SecureSocketHost {
 
 										client_state.hs_status = HandshakeStatus::Complete;
 										client_state.ping_recv = Instant::now();
+										client_state.last_handshake = Instant::now();
 										println!("[Socket-H]: Connection established with {:?}", addr);
 									},
 									PacketType::Ping => {
@@ -316,6 +327,8 @@ impl SecureSocketHost {
 					Err(e) =>
 						match e.kind() {
 							std::io::ErrorKind::TimedOut => {
+								// TODO: **SECURITY RISK** Move this to somewhere that isn't dependant on socket
+								// idle.
 								host.clients.lock().retain(|_, client_state| {
 									match client_state.hs_status {
 										HandshakeStatus::Pending =>
@@ -333,6 +346,13 @@ impl SecureSocketHost {
 												println!(
 													"[Socket-H]: Connection lost to {:?}: no ping received in \
 													 timeframe.",
+													client_state.addr
+												);
+												false
+											} else if client_state.last_handshake.elapsed() > HANDSHAKE_MAX_ALLOWED
+											{
+												println!(
+													"[Socket-H]: Connection lost to {:?}: expected renegotiation.",
 													client_state.addr
 												);
 												false
