@@ -30,6 +30,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1000);
 // TODO: Increase to something reasonable
 const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(30);
 const HANDSHAKE_MAX_ALLOWED: Duration = Duration::from_secs(32);
+// How many nonces of late packets to keep.
+const AMT_OF_PREV_NONCES: usize = 10;
+const MAX_ENCRYPTED_PAYLOAD: usize = 65464;
 
 #[derive(FromRepr, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -81,14 +84,10 @@ pub struct SecureSocketHost {
 
 struct ClientState {
 	addr: SocketAddr,
-	cipher: ChaCha20Poly1305,
 	hs_status: HandshakeStatus,
-	snd_seq: u64,
-	rcv_seq: u64,
-	nonce_rng_snd: ChaCha20Rng,
-	nonce_rng_rcv: ChaCha20Rng,
 	ping_recv: Instant,
 	last_handshake: Instant,
+	crypto: CryptoState,
 }
 
 #[derive(PartialEq, Eq)]
@@ -153,30 +152,22 @@ impl SecureSocketHost {
 										continue;
 									}
 
-									let RngAndCipher {
-										nonce_rng_snd,
-										nonce_rng_rcv,
-										cipher,
-										other_host_id,
-									} = ecdh_snd.handshake(&host.host_keys, ecdh_rcv);
+									let client_id = ecdh_rcv.hid.clone();
+									let crypto = ecdh_snd.handshake(&host.host_keys, ecdh_rcv);
 
-									host.clients.lock().insert(other_host_id, ClientState {
+									host.clients.lock().insert(client_id, ClientState {
 										addr,
 										hs_status: HandshakeStatus::Pending,
-										nonce_rng_snd,
-										nonce_rng_rcv,
-										snd_seq: 0,
-										rcv_seq: 0,
-										cipher,
 										ping_recv: Instant::now(),
 										last_handshake: Instant::now(),
+										crypto,
 									});
 
 									println!("[Socket-H]: Connection pending with {:?}", addr);
 									continue;
 								}
 
-								if len < 129 {
+								if len < 123 {
 									println!("[Socket-H]: Rejected packet from {:?}, reason: truncated", addr);
 									continue;
 								}
@@ -185,7 +176,6 @@ impl SecureSocketHost {
 								let c_id = Hash::from(c_id_b);
 								let seq_b: [u8; 8] = socket_buf[33..41].try_into().unwrap();
 								let seq = u64::from_le_bytes(seq_b);
-								let encrypted = &socket_buf[41..len];
 								let mut clients = host.clients.lock();
 
 								let mut client_state = match clients.get_mut(&c_id) {
@@ -199,53 +189,19 @@ impl SecureSocketHost {
 									},
 								};
 
-								if seq > client_state.rcv_seq {
-									println!("[Socket-H]: Rejected packet from {:?}, reason: late", addr);
-									continue;
-								}
-
-								let mut nonce_b = [0_u8; 12];
-								let mut dropped = 0_usize;
-
-								while seq < client_state.rcv_seq {
-									client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
-									client_state.rcv_seq += 1;
-									dropped += 1;
-								}
-
-								// TODO: window?
-								if dropped > 0 {
-									println!("[Socket-H]: Detected {} dropped packets from {:?}", dropped, addr);
-								}
-
-								client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
-								let nonce = Nonce::from_slice(&nonce_b);
-								client_state.rcv_seq += 1;
-
-								let decrypted = match client_state.cipher.decrypt(nonce, encrypted) {
+								let msg = match client_state.crypto.decrypt(seq, &socket_buf[41..len]) {
 									Ok(ok) => ok,
+									Err(e @ CryptoError::Decryption) | Err(e @ CryptoError::Truncated) => {
+										println!("[Socket-H]: Connection drop to {:?}: {}", addr, e);
+										drop(client_state);
+										clients.remove(&c_id);
+										continue;
+									},
 									Err(e) => {
-										println!(
-											"[Socket-H]: Rejected packet from {:?}, reason: encryption error: {}",
-											addr, e
-										);
+										println!("[Socket-H]: Rejected packet from {:?}, reason: {}", addr, e);
 										continue;
 									},
 								};
-
-								assert!(decrypted.len() >= 72);
-								let msg_len_b: [u8; 8] = decrypted[0..8].try_into().unwrap();
-								let msg_len = u64::from_le_bytes(msg_len_b) as usize;
-
-								if msg_len > decrypted.len() + 8 {
-									println!(
-										"[Socket-H]: Rejected packet from {:?}, reason: invalid message length",
-										addr
-									);
-									continue;
-								}
-
-								let msg = decrypted[8..(8 + msg_len)].to_vec();
 
 								match packet_type {
 									PacketType::ECDH => unreachable!(),
@@ -381,33 +337,16 @@ impl SecureSocketHost {
 		&self,
 		client_state: &mut ClientState,
 		packet_type: PacketType,
-		mut data: Vec<u8>,
+		data: Vec<u8>,
 	) -> Result<(), String> {
 		let mut send_buf = Vec::with_capacity(129);
 		send_buf.push(packet_type as u8);
 		send_buf.extend_from_slice(self.host_keys.id().as_bytes());
-		send_buf.extend_from_slice(&client_state.snd_seq.to_le_bytes());
-
-		let mut nonce_b = [0_u8; 12];
-		client_state.nonce_rng_snd.fill_bytes(&mut nonce_b);
-		client_state.snd_seq += 1;
-
-		let nonce = Nonce::from_slice(&nonce_b);
-		let msg_len = data.len();
-		let mut data_ext = Vec::with_capacity(72);
-		data_ext.extend_from_slice(&(msg_len as u64).to_le_bytes());
-		data_ext.append(&mut data);
-
-		if data_ext.len() < 72 {
-			let mut padding = vec![0_u8; 72 - data_ext.len()];
-			OsRng::fill(&mut OsRng, padding.as_mut_slice());
-			data_ext.append(&mut padding);
-		}
-
-		let mut encrypted = client_state
-			.cipher
-			.encrypt(nonce, &*data_ext)
-			.map_err(|e| format!("Failed to encrypt data: {}", e))?;
+		let (seq, mut encrypted) = client_state
+			.crypto
+			.encrypt(data)
+			.map_err(|e| format!("Failed to send packet to {:?}: {}", client_state.addr, e))?;
+		send_buf.extend_from_slice(&seq.to_le_bytes());
 		send_buf.append(&mut encrypted);
 
 		match self.socket.send_to(&*send_buf, client_state.addr.clone()) {
@@ -435,12 +374,8 @@ pub struct SecureSocketClient {
 
 struct SSCState {
 	verified: bool,
-	snd_seq: u64,
-	rcv_seq: u64,
-	nonce_rng_snd: ChaCha20Rng,
-	nonce_rng_rcv: ChaCha20Rng,
-	cipher: ChaCha20Poly1305,
 	renegotiating: bool,
+	crypto: CryptoState,
 }
 
 impl SecureSocketClient {
@@ -551,21 +486,13 @@ impl SecureSocketClient {
 											},
 										};
 
-										let RngAndCipher {
-											nonce_rng_snd,
-											nonce_rng_rcv,
-											cipher,
-											..
-										} = ecdh_data_op.take().unwrap().handshake(&client.host_keys, ecdh_rcv);
+										let crypto =
+											ecdh_data_op.take().unwrap().handshake(&client.host_keys, ecdh_rcv);
 
 										*client.state.lock() = Some(SSCState {
 											verified: false,
-											nonce_rng_rcv,
-											nonce_rng_snd,
-											snd_seq: 0,
-											rcv_seq: 0,
-											cipher,
 											renegotiating: false,
+											crypto,
 										});
 
 										client_state_set = true;
@@ -600,7 +527,7 @@ impl SecureSocketClient {
 											continue;
 										}
 
-										if len < 129 {
+										if len < 123 {
 											println!("[Socket-C]: Received message, but it is truncated.");
 											continue;
 										}
@@ -622,86 +549,24 @@ impl SecureSocketClient {
 
 										let seq_b: [u8; 8] = socket_buf[33..41].try_into().unwrap();
 										let seq = u64::from_le_bytes(seq_b);
-										let encrypted = &socket_buf[41..len];
 										let mut client_state_gu = client.state.lock();
 										let mut client_state = client_state_gu.as_mut().unwrap();
 
-										if seq > client_state.rcv_seq {
-											println!("[Socket-C]: Dropped message because it was late.");
-											continue;
-										}
-
-										let mut nonce_b = [0_u8; 12];
-										let mut dropped = 0_usize;
-
-										// TODO: Should out of order packets be allowed or
-										// should a window algo exist?
-										while seq < client_state.rcv_seq {
-											client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
-											client_state.rcv_seq += 1;
-											dropped += 1;
-										}
-
-										if dropped > 0 {
-											println!(
-												"[Socket-C]: Detected {} dropped packets from host.",
-												dropped
-											);
-										}
-
-										client_state.nonce_rng_rcv.fill_bytes(&mut nonce_b);
-										client_state.rcv_seq += 1;
-										let nonce = Nonce::from_slice(&nonce_b);
-
-										if dropped != 0 {
-											println!("[Socket-C]: Detected {} lost packets.", dropped);
-										}
-
-										let decrypted = match client_state.cipher.decrypt(nonce, encrypted) {
+										let msg = match client_state.crypto.decrypt(seq, &socket_buf[41..len]) {
 											Ok(ok) => ok,
-											Err(_) => {
-												// TODO: Should a connection be dropped if
-												// it is just one packet?
+											Err(e @ CryptoError::Decryption) | Err(e @ CryptoError::Truncated) => {
 												drop(client_state);
 												*client_state_gu = None;
 												client_state_set = false;
 												client_state_verified = false;
-
-												println!(
-													"[Socket-C]: Connection dropped. Failed to decrypt message."
-												);
+												println!("[Socket-C]: Connection dropped because {}", e);
+												continue;
+											},
+											Err(e) => {
+												println!("[Socket-C]: Packet dropped because {}", e);
 												continue;
 											},
 										};
-
-										if decrypted.len() < 72 {
-											drop(client_state);
-											*client_state_gu = None;
-											client_state_set = false;
-											client_state_verified = false;
-
-											println!(
-												"[Socket-C]: Connection dropped. Decrypted message is truncated."
-											);
-											continue;
-										}
-
-										let msg_len_b: [u8; 8] = decrypted[0..8].try_into().unwrap();
-										let msg_len = u64::from_le_bytes(msg_len_b) as usize;
-
-										if msg_len > decrypted.len() + 8 {
-											drop(client_state);
-											*client_state_gu = None;
-											client_state_set = false;
-											client_state_verified = false;
-
-											println!(
-												"[Socket-C]: Connection dropped. Decrypted message is malformed."
-											);
-											continue;
-										}
-
-										let msg = &decrypted[8..(8 + msg_len)];
 
 										match packet_type {
 											PacketType::ECDH => unreachable!(),
@@ -720,8 +585,8 @@ impl SecureSocketClient {
 													client_state_verified = false;
 
 													println!(
-														"[Socket-C]: Connection verification failed, packet is \
-														 truncated."
+														"[Socket-C]: Connection verification failed, packet \
+														 isn't the correct length"
 													);
 													continue;
 												}
@@ -756,7 +621,7 @@ impl SecureSocketClient {
 													ping_sent.elapsed().as_micros() as f32 / 1000.0
 												);
 											},
-											PacketType::Message => recv_fn(&client, msg.to_vec()),
+											PacketType::Message => recv_fn(&client, msg),
 										}
 									},
 								},
@@ -795,14 +660,14 @@ impl SecureSocketClient {
 		self.send_internal(PacketType::Message, data)
 	}
 
-	fn send_internal(&self, packet_type: PacketType, mut data: Vec<u8>) -> Result<(), String> {
+	fn send_internal(&self, packet_type: PacketType, data: Vec<u8>) -> Result<(), String> {
 		let mut client_state_gu = self.state.lock();
 
 		if client_state_gu.is_none() {
 			return Err(format!("Connection not established"));
 		}
 
-		let mut client_state = client_state_gu.as_mut().unwrap();
+		let client_state = client_state_gu.as_mut().unwrap();
 
 		if packet_type != PacketType::Verify && !client_state.verified {
 			return Err(format!("Connection not verified"));
@@ -817,32 +682,10 @@ impl SecureSocketClient {
 		let mut send_buf = Vec::with_capacity(129);
 		send_buf.push(packet_type as u8);
 		send_buf.extend_from_slice(self.host_keys.id().as_bytes());
-		send_buf.extend_from_slice(&client_state.snd_seq.to_le_bytes());
-
-		let mut nonce_b = [0_u8; 12];
-		client_state.nonce_rng_snd.fill_bytes(&mut nonce_b);
-		client_state.snd_seq += 1;
-
-		let nonce = Nonce::from_slice(&nonce_b);
-		let msg_len = data.len();
-		let mut data_ext = Vec::with_capacity(72);
-		data_ext.extend_from_slice(&(msg_len as u64).to_le_bytes());
-		data_ext.append(&mut data);
-
-		if data_ext.len() < 72 {
-			let mut padding = vec![0_u8; 72 - data_ext.len()];
-			OsRng::fill(&mut OsRng, padding.as_mut_slice());
-			data_ext.append(&mut padding);
-		}
-
-		let mut encrypted = client_state
-			.cipher
-			.encrypt(nonce, &*data_ext)
-			.map_err(|e| format!("failed to encrypt data: {}", e))?;
+		let (seq, mut encrypted) = client_state.crypto.encrypt(data).map_err(|e| format!("{}", e))?;
+		send_buf.extend_from_slice(&seq.to_le_bytes());
 		send_buf.append(&mut encrypted);
-
 		self.socket.send(&*send_buf).map_err(|e| format!("send error: {}", e.kind()))?;
-
 		Ok(())
 	}
 
@@ -890,11 +733,11 @@ impl ECDHSnd {
 		}
 	}
 
-	fn handshake(self, host_keys: &HostKeys, rcv: ECDHRcv) -> RngAndCipher {
+	fn handshake(self, host_keys: &HostKeys, rcv: ECDHRcv) -> CryptoState {
 		let secret = hash(self.secret.diffie_hellman(&rcv.public).as_bytes().as_slice());
 
-		RngAndCipher {
-			other_host_id: rcv.hid,
+		CryptoState {
+			cipher: ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(secret.as_bytes())),
 			nonce_rng_snd: ChaCha20Rng::from_seed(
 				hash_slices(&[
 					host_keys.id().as_bytes(),
@@ -915,7 +758,9 @@ impl ECDHSnd {
 				])
 				.into(),
 			),
-			cipher: ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(secret.as_bytes())),
+			seq_snd: 0,
+			seq_rcv: 0,
+			nonce_previous: HashMap::new(),
 		}
 	}
 }
@@ -968,11 +813,123 @@ impl ECDHRcv {
 	}
 }
 
-struct RngAndCipher {
-	other_host_id: Hash,
+struct CryptoState {
+	cipher: ChaCha20Poly1305,
 	nonce_rng_snd: ChaCha20Rng,
 	nonce_rng_rcv: ChaCha20Rng,
-	cipher: ChaCha20Poly1305,
+	seq_snd: u64,
+	seq_rcv: u64,
+	nonce_previous: HashMap<u64, Nonce>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CryptoError {
+	LateOrDup,
+	Decryption,
+	Encryption,
+	Truncated,
+}
+
+impl std::fmt::Display for CryptoError {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		match self {
+			Self::LateOrDup => write!(f, "packet is either late or a duplicate"),
+			Self::Decryption => write!(f, "packet decrypt failed"),
+			Self::Encryption => write!(f, "packet encrypt failed"),
+			Self::Truncated => write!(f, "packet data is/will be truncated"),
+		}
+	}
+}
+
+impl CryptoState {
+	fn decrypt(&mut self, seq: u64, encrypted: &[u8]) -> Result<Vec<u8>, CryptoError> {
+		let nonce = if seq < self.seq_rcv {
+			match self.nonce_previous.remove(&seq) {
+				Some(nonce) => nonce,
+				None => return Err(CryptoError::LateOrDup),
+			}
+		} else if seq > self.seq_rcv {
+			let late_seq_start = if seq - self.seq_rcv > AMT_OF_PREV_NONCES as u64 {
+				self.nonce_previous.clear();
+				seq - AMT_OF_PREV_NONCES as u64
+			} else {
+				self.seq_rcv
+			};
+
+			for late_seq in self.seq_rcv..seq {
+				let mut nonce_b = [0_u8; 12];
+				self.nonce_rng_rcv.fill_bytes(&mut nonce_b);
+
+				if late_seq >= late_seq_start {
+					self.nonce_previous.insert(late_seq, Nonce::from(nonce_b));
+				}
+
+				self.seq_rcv += 1;
+			}
+
+			if self.nonce_previous.len() > AMT_OF_PREV_NONCES {
+				let remove_amt = self.nonce_previous.len() - AMT_OF_PREV_NONCES;
+				let mut keys: Vec<u64> = self.nonce_previous.keys().cloned().collect();
+				keys.sort_unstable();
+
+				for (_, key) in (0..remove_amt).into_iter().zip(keys.into_iter()) {
+					self.nonce_previous.remove(&key);
+				}
+			}
+
+			let mut nonce_b = [0_u8; 12];
+			self.nonce_rng_rcv.fill_bytes(&mut nonce_b);
+			assert!(self.seq_rcv == seq);
+			self.seq_rcv += 1;
+			Nonce::from(nonce_b)
+		} else {
+			let mut nonce_b = [0_u8; 12];
+			self.nonce_rng_rcv.fill_bytes(&mut nonce_b);
+			self.seq_rcv += 1;
+			Nonce::from(nonce_b)
+		};
+
+		let decrypted = self.cipher.decrypt(&nonce, encrypted).map_err(|_| CryptoError::Decryption)?;
+
+		if decrypted.len() < 66 {
+			return Err(CryptoError::Truncated);
+		}
+
+		let msg_len_b: [u8; 2] = decrypted[0..2].try_into().unwrap();
+		let msg_len = u16::from_le_bytes(msg_len_b) as usize;
+
+		if msg_len > decrypted.len() + 2 {
+			return Err(CryptoError::Truncated);
+		}
+
+		Ok(decrypted[2..(2 + msg_len)].to_vec())
+	}
+
+	fn encrypt(&mut self, mut data: Vec<u8>) -> Result<(u64, Vec<u8>), CryptoError> {
+		let seq = self.seq_snd;
+		self.seq_snd += 1;
+		let mut nonce_b = [0_u8; 12];
+		self.nonce_rng_snd.fill_bytes(&mut nonce_b);
+		let nonce = Nonce::from(nonce_b);
+		let msg_len = data.len();
+
+		if msg_len > MAX_ENCRYPTED_PAYLOAD {
+			return Err(CryptoError::Truncated);
+		}
+
+		let mut decrypted = Vec::with_capacity(66);
+		decrypted.extend_from_slice(&(msg_len as u16).to_le_bytes());
+		decrypted.append(&mut data);
+
+		if msg_len < 64 {
+			let mut padding = vec![0_u8; 66 - msg_len];
+			OsRng::fill(&mut OsRng, padding.as_mut_slice());
+			decrypted.append(&mut padding);
+		}
+
+		let encrypted = self.cipher.encrypt(&nonce, decrypted.as_slice()).map_err(|_| CryptoError::Encryption)?;
+		Ok((seq, encrypted))
+	}
 }
 
 #[test]
