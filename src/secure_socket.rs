@@ -18,21 +18,22 @@ use strum::FromRepr;
 pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketHost>, Hash, Vec<u8>) + Send>;
 pub type ClientRecvFn = Box<dyn Fn(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
 
-// How often the clients sends pings.
-const PING_INTERVAL: Duration = Duration::from_millis(3000);
-// Time between the last ping received and when to disconnect client due to the connection being idle. Must be
-// higher than PING_INTERVAL.
-const PING_DISCONNECT: Duration = Duration::from_millis(4000);
-// Time between start of handshake and when to cancel handshake due to the client not responding.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1000);
-// How often to renegotiate secrets. Time between last handshake and when to disconnect the client due to
-// it not renegotiating. Must be higher than HANDSHAKE_INTERVAL.
-// TODO: Increase to something reasonable
-const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(30);
-const HANDSHAKE_MAX_ALLOWED: Duration = Duration::from_secs(32);
+// Interval at which the client sends pings.
+const PING_INTERVAL: Duration = Duration::from_secs(3);
+// Max duration from previous ping before server disconnects client.
+const PING_DISCONNECT: Duration = Duration::from_secs(5);
+// Max duration from start of handshake before server disconnects client.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+// Interval at which the client does a handshake.
+const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(150); // 2m30s
+// Max duration from last handshake before the server disconnects client.
+const HANDSHAKE_DISCONNECT: Duration = Duration::from_secs(180); // 3m
 // How many nonces of late packets to keep.
-const AMT_OF_PREV_NONCES: usize = 10;
+const PREV_NONCE_WINDOW: usize = 15;
+// Max encrypted payload size. (UDP max payload - 43B)
 const MAX_ENCRYPTED_PAYLOAD: usize = 65464;
+// Interval to check clients (connection idle & handshake lifetime)
+const CLIENTS_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(FromRepr, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -119,8 +120,44 @@ impl SecureSocketHost {
 
 		*host_ret.thrd_recv_h.lock() = Some(thread::spawn(move || {
 			let mut socket_buf = vec![0_u8; 65535];
+			let mut last_clients_check = Instant::now();
 
 			loop {
+				if last_clients_check.elapsed() > CLIENTS_CHECK_INTERVAL {
+					host.clients.lock().retain(|_, client_state| {
+						match client_state.hs_status {
+							HandshakeStatus::Pending =>
+								if client_state.ping_recv.elapsed() > HANDSHAKE_TIMEOUT {
+									println!(
+										"[Socket-H]: Connection lost to {:?}: handshake timed out",
+										client_state.addr
+									);
+									false
+								} else {
+									true
+								},
+							HandshakeStatus::Complete =>
+								if client_state.ping_recv.elapsed() > PING_DISCONNECT {
+									println!(
+										"[Socket-H]: Connection lost to {:?}: no ping received in timeframe.",
+										client_state.addr
+									);
+									false
+								} else if client_state.last_handshake.elapsed() > HANDSHAKE_DISCONNECT {
+									println!(
+										"[Socket-H]: Connection lost to {:?}: expected renegotiation.",
+										client_state.addr
+									);
+									false
+								} else {
+									true
+								},
+						}
+					});
+
+					last_clients_check = Instant::now();
+				}
+
 				match host.socket.recv_from(&mut *socket_buf) {
 					Ok((len, addr)) => {
 						if len < 1 {
@@ -282,42 +319,7 @@ impl SecureSocketHost {
 					},
 					Err(e) =>
 						match e.kind() {
-							std::io::ErrorKind::TimedOut => {
-								// TODO: **SECURITY RISK** Move this to somewhere that isn't dependant on socket
-								// idle.
-								host.clients.lock().retain(|_, client_state| {
-									match client_state.hs_status {
-										HandshakeStatus::Pending =>
-											if client_state.ping_recv.elapsed() > HANDSHAKE_TIMEOUT {
-												println!(
-													"[Socket-H]: Connection lost to {:?}: handshake timed out",
-													client_state.addr
-												);
-												false
-											} else {
-												true
-											},
-										HandshakeStatus::Complete =>
-											if client_state.ping_recv.elapsed() > PING_DISCONNECT {
-												println!(
-													"[Socket-H]: Connection lost to {:?}: no ping received in \
-													 timeframe.",
-													client_state.addr
-												);
-												false
-											} else if client_state.last_handshake.elapsed() > HANDSHAKE_MAX_ALLOWED
-											{
-												println!(
-													"[Socket-H]: Connection lost to {:?}: expected renegotiation.",
-													client_state.addr
-												);
-												false
-											} else {
-												true
-											},
-									}
-								});
-							},
+							std::io::ErrorKind::TimedOut => (),
 							kind => println!("[Socket-H]: Failed to receive packet: {}", kind),
 						},
 				}
@@ -740,9 +742,9 @@ impl ECDHSnd {
 			cipher: ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(secret.as_bytes())),
 			nonce_rng_snd: ChaCha20Rng::from_seed(
 				hash_slices(&[
-					host_keys.id().as_bytes(),
+					&host_keys.public_key().to_bytes(),
 					self.random.as_slice(),
-					rcv.hid.as_bytes(),
+					&host_keys.public_key_of(rcv.hid).unwrap().to_bytes(),
 					rcv.random.as_slice(),
 					secret.as_bytes(),
 				])
@@ -750,9 +752,9 @@ impl ECDHSnd {
 			),
 			nonce_rng_rcv: ChaCha20Rng::from_seed(
 				hash_slices(&[
-					rcv.hid.as_bytes(),
+					&host_keys.public_key_of(rcv.hid).unwrap().to_bytes(),
 					rcv.random.as_slice(),
-					host_keys.id().as_bytes(),
+					&host_keys.public_key().to_bytes(),
 					self.random.as_slice(),
 					secret.as_bytes(),
 				])
@@ -849,9 +851,9 @@ impl CryptoState {
 				None => return Err(CryptoError::LateOrDup),
 			}
 		} else if seq > self.seq_rcv {
-			let late_seq_start = if seq - self.seq_rcv > AMT_OF_PREV_NONCES as u64 {
+			let late_seq_start = if seq - self.seq_rcv > PREV_NONCE_WINDOW as u64 {
 				self.nonce_previous.clear();
-				seq - AMT_OF_PREV_NONCES as u64
+				seq - PREV_NONCE_WINDOW as u64
 			} else {
 				self.seq_rcv
 			};
@@ -867,8 +869,8 @@ impl CryptoState {
 				self.seq_rcv += 1;
 			}
 
-			if self.nonce_previous.len() > AMT_OF_PREV_NONCES {
-				let remove_amt = self.nonce_previous.len() - AMT_OF_PREV_NONCES;
+			if self.nonce_previous.len() > PREV_NONCE_WINDOW {
+				let remove_amt = self.nonce_previous.len() - PREV_NONCE_WINDOW;
 				let mut keys: Vec<u64> = self.nonce_previous.keys().cloned().collect();
 				keys.sort_unstable();
 
