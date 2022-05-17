@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use strum::FromRepr;
 
-pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketHost>, Hash, Vec<u8>) + Send>;
+pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketServer>, Hash, Vec<u8>) + Send>;
 pub type ClientRecvFn = Box<dyn Fn(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
 
 // Interval at which the client sends pings.
@@ -76,7 +76,7 @@ pub fn hash_slices(inputs: &[&[u8]]) -> Hash {
 	hasher.finalize()
 }
 
-pub struct SecureSocketHost {
+pub struct SecureSocketServer {
 	host_keys: HostKeys,
 	socket: UdpSocket,
 	clients: Mutex<HashMap<Hash, ClientState>>,
@@ -97,7 +97,7 @@ enum HandshakeStatus {
 	Complete,
 }
 
-impl SecureSocketHost {
+impl SecureSocketServer {
 	pub fn listen<A: ToSocketAddrs>(
 		host_keys: HostKeys,
 		listen_addr: A,
@@ -938,20 +938,20 @@ impl CryptoState {
 fn test() {
 	use std::thread;
 
-	let mut h_host_keys = HostKeys::generate();
+	let mut s_host_keys = HostKeys::generate();
 	let mut c_host_keys = HostKeys::generate();
-	h_host_keys.trust(c_host_keys.enc_public_key()).unwrap();
-	c_host_keys.trust(h_host_keys.enc_public_key()).unwrap();
+	s_host_keys.trust(c_host_keys.enc_public_key()).unwrap();
+	c_host_keys.trust(s_host_keys.enc_public_key()).unwrap();
 
-	let h_thrd_h = thread::spawn(move || {
-		let host = SecureSocketHost::listen(
-			h_host_keys,
+	let s_thrd_h = thread::spawn(move || {
+		let server = SecureSocketServer::listen(
+			s_host_keys,
 			"0.0.0.0:1026",
 			Box::new(move |_host, _client_uid, _packet_data| {}),
 		)
 		.unwrap();
 
-		host.wait_for_exit().unwrap();
+		server.wait_for_exit().unwrap();
 	});
 
 	let c_thrd_h = thread::spawn(move || {
@@ -963,6 +963,6 @@ fn test() {
 		client.wait_for_exit().unwrap();
 	});
 
-	h_thrd_h.join().unwrap();
+	s_thrd_h.join().unwrap();
 	c_thrd_h.join().unwrap();
 }
