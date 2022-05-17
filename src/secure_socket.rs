@@ -15,8 +15,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use strum::FromRepr;
 
-pub type HostRecvFn = Box<dyn Fn(&Arc<SecureSocketServer>, Hash, Vec<u8>) + Send>;
-pub type ClientRecvFn = Box<dyn Fn(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
+pub type SSSRecvFn = Box<dyn FnMut(&Arc<SecureSocketServer>, Hash, Vec<u8>) + Send>;
+pub type SSSOnConnect = Box<dyn FnMut(&Arc<SecureSocketServer>, Hash) + Send>;
+pub type SSSOnDisconnect = Box<dyn FnMut(&Arc<SecureSocketServer>, Hash) + Send>;
+pub type SSCRecvFn = Box<dyn FnMut(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
+pub type SSCOnConnect = Box<dyn FnMut(&Arc<SecureSocketClient>) + Send>;
+pub type SSCOnDisconnect = Box<dyn FnMut(&Arc<SecureSocketClient>) + Send>;
 
 // Interval at which the client sends pings.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
@@ -25,9 +29,9 @@ const PING_DISCONNECT: Duration = Duration::from_secs(5);
 // Max duration from start of handshake before server disconnects client.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 // Interval at which the client does a handshake.
-const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(150); // 2m30s
+const HANDSHAKE_INTERVAL: Duration = Duration::from_secs(150);
 // Max duration from last handshake before the server disconnects client.
-const HANDSHAKE_DISCONNECT: Duration = Duration::from_secs(180); // 3m
+const HANDSHAKE_DISCONNECT: Duration = Duration::from_secs(180);
 // How many nonces of late packets to keep.
 const PREV_NONCE_WINDOW: usize = 15;
 // Max encrypted payload size. (UDP max payload - 43B)
@@ -85,23 +89,19 @@ pub struct SecureSocketServer {
 
 struct ClientState {
 	addr: SocketAddr,
-	hs_status: HandshakeStatus,
+	verified: bool,
 	ping_recv: Instant,
 	last_handshake: Instant,
 	crypto: CryptoState,
-}
-
-#[derive(PartialEq, Eq)]
-enum HandshakeStatus {
-	Pending,
-	Complete,
 }
 
 impl SecureSocketServer {
 	pub fn listen<A: ToSocketAddrs>(
 		host_keys: HostKeys,
 		listen_addr: A,
-		recv_fn: HostRecvFn,
+		mut recv_fn: SSSRecvFn,
+		mut on_connect: SSSOnConnect,
+		mut on_disconnect: SSSOnDisconnect,
 	) -> Result<Arc<Self>, String> {
 		let listen_addr = listen_addr.to_socket_addrs().unwrap().next().unwrap();
 		let socket = UdpSocket::bind(listen_addr.clone()).map_err(|e| format!("Failed to bind socket: {}", e))?;
@@ -124,36 +124,47 @@ impl SecureSocketServer {
 
 			loop {
 				if last_clients_check.elapsed() > CLIENTS_CHECK_INTERVAL {
-					host.clients.lock().retain(|_, client_state| {
-						match client_state.hs_status {
-							HandshakeStatus::Pending =>
-								if client_state.ping_recv.elapsed() > HANDSHAKE_TIMEOUT {
-									println!(
-										"[Socket-H]: Connection lost to {:?}: handshake timed out",
-										client_state.addr
-									);
-									false
-								} else {
-									true
-								},
-							HandshakeStatus::Complete =>
-								if client_state.ping_recv.elapsed() > PING_DISCONNECT {
-									println!(
-										"[Socket-H]: Connection lost to {:?}: no ping received in timeframe.",
-										client_state.addr
-									);
-									false
-								} else if client_state.last_handshake.elapsed() > HANDSHAKE_DISCONNECT {
-									println!(
-										"[Socket-H]: Connection lost to {:?}: expected renegotiation.",
-										client_state.addr
-									);
-									false
-								} else {
-									true
-								},
+					let mut call_disconnect = Vec::new();
+
+					host.clients.lock().retain(|client_id, client_state| {
+						if client_state.verified {
+							if client_state.ping_recv.elapsed() > PING_DISCONNECT {
+								println!(
+									"[Socket-H]: Connection lost to {:?}: no ping received in timeframe.",
+									client_state.addr
+								);
+
+								call_disconnect.push(client_id.clone());
+								false
+							} else if client_state.last_handshake.elapsed() > HANDSHAKE_DISCONNECT {
+								println!(
+									"[Socket-H]: Connection lost to {:?}: expected renegotiation.",
+									client_state.addr
+								);
+
+								call_disconnect.push(client_id.clone());
+								false
+							} else {
+								true
+							}
+						} else {
+							if client_state.ping_recv.elapsed() > HANDSHAKE_TIMEOUT {
+								println!(
+									"[Socket-H]: Connection lost to {:?}: handshake timed out",
+									client_state.addr
+								);
+
+								call_disconnect.push(client_id.clone());
+								false
+							} else {
+								true
+							}
 						}
 					});
+
+					for client_id in call_disconnect {
+						on_disconnect(&host, client_id);
+					}
 
 					last_clients_check = Instant::now();
 				}
@@ -194,7 +205,7 @@ impl SecureSocketServer {
 
 									host.clients.lock().insert(client_id, ClientState {
 										addr,
-										hs_status: HandshakeStatus::Pending,
+										verified: false,
 										ping_recv: Instant::now(),
 										last_handshake: Instant::now(),
 										crypto,
@@ -232,6 +243,8 @@ impl SecureSocketServer {
 										println!("[Socket-H]: Connection drop to {:?}: {}", addr, e);
 										drop(client_state);
 										clients.remove(&c_id);
+										drop(clients);
+										on_disconnect(&host, c_id);
 										continue;
 									},
 									Err(e) => {
@@ -288,9 +301,13 @@ impl SecureSocketServer {
 											continue;
 										}
 
-										client_state.hs_status = HandshakeStatus::Complete;
+										client_state.verified = true;
 										client_state.ping_recv = Instant::now();
 										client_state.last_handshake = Instant::now();
+
+										drop(client_state);
+										drop(clients);
+										on_connect(&host, c_id);
 										println!("[Socket-H]: Connection established with {:?}", addr);
 									},
 									PacketType::Ping => {
@@ -329,9 +346,9 @@ impl SecureSocketServer {
 		Ok(host_ret)
 	}
 
-	pub fn send(&self, client_id: Hash, data: Vec<u8>) -> Result<(), String> {
+	pub fn send(&self, client_id: Hash, data: Vec<u8>) -> Result<(), SendError> {
 		let mut clients = self.clients.lock();
-		let mut client_state = clients.get_mut(&client_id).ok_or(String::from("Client not connected."))?;
+		let mut client_state = clients.get_mut(&client_id).ok_or(SendError::NotConnected)?;
 		self.send_internal(&mut client_state, PacketType::Message, data)
 	}
 
@@ -340,21 +357,19 @@ impl SecureSocketServer {
 		client_state: &mut ClientState,
 		packet_type: PacketType,
 		data: Vec<u8>,
-	) -> Result<(), String> {
+	) -> Result<(), SendError> {
+		if packet_type != PacketType::Verify && !client_state.verified {
+			return Err(SendError::NotVerified);
+		}
+
 		let mut send_buf = Vec::with_capacity(129);
 		send_buf.push(packet_type as u8);
 		send_buf.extend_from_slice(self.host_keys.id().as_bytes());
-		let (seq, mut encrypted) = client_state
-			.crypto
-			.encrypt(data)
-			.map_err(|e| format!("Failed to send packet to {:?}: {}", client_state.addr, e))?;
+		let (seq, mut encrypted) = client_state.crypto.encrypt(data)?;
 		send_buf.extend_from_slice(&seq.to_le_bytes());
 		send_buf.append(&mut encrypted);
-
-		match self.socket.send_to(&*send_buf, client_state.addr.clone()) {
-			Ok(_) => Ok(()),
-			Err(e) => Err(format!("Failed to send packet to {:?}: {}", client_state.addr, e.kind())),
-		}
+		self.socket.send_to(&*send_buf, client_state.addr.clone())?;
+		Ok(())
 	}
 
 	pub fn wait_for_exit(&self) -> Result<(), String> {
@@ -384,7 +399,9 @@ impl SecureSocketClient {
 	pub fn connect<A: ToSocketAddrs>(
 		host_keys: HostKeys,
 		host_addr: A,
-		recv_fn: ClientRecvFn,
+		mut recv_fn: SSCRecvFn,
+		mut on_connect: SSCOnConnect,
+		mut on_disconnect: SSCOnDisconnect,
 	) -> Result<Arc<Self>, String> {
 		let host_addr = host_addr.to_socket_addrs().unwrap().next().unwrap();
 		let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind socket: {}", e))?;
@@ -435,6 +452,7 @@ impl SecureSocketClient {
 							*client.state.lock() = None;
 							client_state_set = false;
 							client_state_verified = false;
+							on_disconnect(&client);
 							println!("[Socket-C]: Connection lost: failed to send ECDH packet: {}", e.kind());
 							continue;
 						}
@@ -445,6 +463,7 @@ impl SecureSocketClient {
 							*client.state.lock() = None;
 							client_state_set = false;
 							client_state_verified = false;
+							on_disconnect(&client);
 							println!("[Socket-C]: Connection lost: failed to receive ping response from host.");
 						}
 
@@ -456,6 +475,7 @@ impl SecureSocketClient {
 								*client.state.lock() = None;
 								client_state_set = false;
 								client_state_verified = false;
+								on_disconnect(&client);
 								println!("[Socket-C]: Connection lost: failed to send ping to host: {}", e);
 							}
 						}
@@ -541,6 +561,7 @@ impl SecureSocketClient {
 											*client.state.lock() = None;
 											client_state_set = false;
 											client_state_verified = false;
+											on_disconnect(&client);
 
 											println!(
 												"[Socket-C]: Connection dropped. Received message, but host \
@@ -561,6 +582,7 @@ impl SecureSocketClient {
 												*client_state_gu = None;
 												client_state_set = false;
 												client_state_verified = false;
+												on_disconnect(&client);
 												println!("[Socket-C]: Connection dropped because {}", e);
 												continue;
 											},
@@ -613,6 +635,8 @@ impl SecureSocketClient {
 												client_state_verified = true;
 												handshake_last = Instant::now();
 												client.conn_cond.notify_all();
+												drop(client_state);
+												on_connect(&client);
 												println!("[Socket-C]: Connection is established to the host.");
 											},
 											PacketType::Ping => {
@@ -658,21 +682,21 @@ impl SecureSocketClient {
 		}
 	}
 
-	pub fn send(&self, data: Vec<u8>) -> Result<(), String> {
+	pub fn send(&self, data: Vec<u8>) -> Result<(), SendError> {
 		self.send_internal(PacketType::Message, data)
 	}
 
-	fn send_internal(&self, packet_type: PacketType, data: Vec<u8>) -> Result<(), String> {
+	fn send_internal(&self, packet_type: PacketType, data: Vec<u8>) -> Result<(), SendError> {
 		let mut client_state_gu = self.state.lock();
 
 		if client_state_gu.is_none() {
-			return Err(format!("Connection not established"));
+			return Err(SendError::NotConnected);
 		}
 
 		let client_state = client_state_gu.as_mut().unwrap();
 
 		if packet_type != PacketType::Verify && !client_state.verified {
-			return Err(format!("Connection not verified"));
+			return Err(SendError::NotVerified);
 		}
 
 		if client_state.renegotiating {
@@ -684,10 +708,10 @@ impl SecureSocketClient {
 		let mut send_buf = Vec::with_capacity(129);
 		send_buf.push(packet_type as u8);
 		send_buf.extend_from_slice(self.host_keys.id().as_bytes());
-		let (seq, mut encrypted) = client_state.crypto.encrypt(data).map_err(|e| format!("{}", e))?;
+		let (seq, mut encrypted) = client_state.crypto.encrypt(data)?;
 		send_buf.extend_from_slice(&seq.to_le_bytes());
 		send_buf.append(&mut encrypted);
-		self.socket.send(&*send_buf).map_err(|e| format!("send error: {}", e.kind()))?;
+		self.socket.send(&*send_buf)?;
 		Ok(())
 	}
 
@@ -697,6 +721,44 @@ impl SecureSocketClient {
 		}
 
 		Ok(())
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+	NotConnected,
+	NotVerified,
+	Encryption,
+	TooLarge,
+	SocketError(std::io::ErrorKind),
+}
+
+impl std::fmt::Display for SendError {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		match self {
+			Self::NotConnected => write!(f, "connection not established"),
+			Self::NotVerified => write!(f, "connection not verified"),
+			Self::Encryption => write!(f, "packet encrypt failed"),
+			Self::TooLarge => write!(f, "packet data would be truncated"),
+			Self::SocketError(e) => write!(f, "socket error: {}", e),
+		}
+	}
+}
+
+impl From<CryptoError> for SendError {
+	fn from(e: CryptoError) -> Self {
+		match e {
+			CryptoError::LateOrDup => unreachable!(),
+			CryptoError::Decryption => unreachable!(),
+			CryptoError::Encryption => Self::Encryption,
+			CryptoError::Truncated => Self::TooLarge,
+		}
+	}
+}
+
+impl From<std::io::Error> for SendError {
+	fn from(e: std::io::Error) -> Self {
+		Self::SocketError(e.kind())
 	}
 }
 
@@ -838,7 +900,7 @@ impl std::fmt::Display for CryptoError {
 			Self::LateOrDup => write!(f, "packet is either late or a duplicate"),
 			Self::Decryption => write!(f, "packet decrypt failed"),
 			Self::Encryption => write!(f, "packet encrypt failed"),
-			Self::Truncated => write!(f, "packet data is/will be truncated"),
+			Self::Truncated => write!(f, "packet data is/would be truncated"),
 		}
 	}
 }
@@ -948,6 +1010,8 @@ fn test() {
 			s_host_keys,
 			"0.0.0.0:1026",
 			Box::new(move |_host, _client_uid, _packet_data| {}),
+			Box::new(move |_host, _client_uid| {}),
+			Box::new(move |_host, _client_uid| {}),
 		)
 		.unwrap();
 
@@ -955,9 +1019,14 @@ fn test() {
 	});
 
 	let c_thrd_h = thread::spawn(move || {
-		let client =
-			SecureSocketClient::connect(c_host_keys, "127.0.0.1:1026", Box::new(move |_client, _packet_data| {}))
-				.unwrap();
+		let client = SecureSocketClient::connect(
+			c_host_keys,
+			"127.0.0.1:1026",
+			Box::new(move |_client, _packet_data| {}),
+			Box::new(move |_client| {}),
+			Box::new(move |_client| {}),
+		)
+		.unwrap();
 
 		client.wait_for_conn(Some(HANDSHAKE_TIMEOUT.clone()));
 		client.wait_for_exit().unwrap();
