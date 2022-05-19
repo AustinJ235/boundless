@@ -4,6 +4,7 @@ extern crate lazy_static;
 
 pub mod client;
 pub mod host_keys;
+pub mod message;
 pub mod platform;
 pub mod secure_socket;
 pub mod server;

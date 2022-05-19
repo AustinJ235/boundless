@@ -15,9 +15,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use strum::FromRepr;
 
-pub type SSSRecvFn = Box<dyn FnMut(&Arc<SecureSocketServer>, Hash, Vec<u8>) + Send>;
-pub type SSSOnConnect = Box<dyn FnMut(&Arc<SecureSocketServer>, Hash) + Send>;
-pub type SSSOnDisconnect = Box<dyn FnMut(&Arc<SecureSocketServer>, Hash) + Send>;
+pub type HostID = Hash;
+pub type SSSRecvFn = Box<dyn FnMut(&Arc<SecureSocketServer>, HostID, Vec<u8>) + Send>;
+pub type SSSOnConnect = Box<dyn FnMut(&Arc<SecureSocketServer>, HostID) + Send>;
+pub type SSSOnDisconnect = Box<dyn FnMut(&Arc<SecureSocketServer>, HostID) + Send>;
 pub type SSCRecvFn = Box<dyn FnMut(&Arc<SecureSocketClient>, Vec<u8>) + Send>;
 pub type SSCOnConnect = Box<dyn FnMut(&Arc<SecureSocketClient>) + Send>;
 pub type SSCOnDisconnect = Box<dyn FnMut(&Arc<SecureSocketClient>) + Send>;
@@ -83,7 +84,7 @@ pub fn hash_slices(inputs: &[&[u8]]) -> Hash {
 pub struct SecureSocketServer {
 	host_keys: HostKeys,
 	socket: UdpSocket,
-	clients: Mutex<HashMap<Hash, ClientState>>,
+	clients: Mutex<HashMap<HostID, ClientState>>,
 	thrd_recv_h: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -221,7 +222,7 @@ impl SecureSocketServer {
 								}
 
 								let c_id_b: [u8; 32] = socket_buf[1..33].try_into().unwrap();
-								let c_id = Hash::from(c_id_b);
+								let c_id = HostID::from(c_id_b);
 								let seq_b: [u8; 8] = socket_buf[33..41].try_into().unwrap();
 								let seq = u64::from_le_bytes(seq_b);
 								let mut clients = host.clients.lock();
@@ -346,7 +347,7 @@ impl SecureSocketServer {
 		Ok(host_ret)
 	}
 
-	pub fn send(&self, client_id: Hash, data: Vec<u8>) -> Result<(), SendError> {
+	pub fn send(&self, client_id: HostID, data: Vec<u8>) -> Result<(), SendError> {
 		let mut clients = self.clients.lock();
 		let mut client_state = clients.get_mut(&client_id).ok_or(SendError::NotConnected)?;
 		self.send_internal(&mut client_state, PacketType::Message, data)
@@ -555,7 +556,7 @@ impl SecureSocketClient {
 										}
 
 										let h_id_b: [u8; 32] = socket_buf[1..33].try_into().unwrap();
-										let h_id = Hash::from(h_id_b);
+										let h_id = HostID::from(h_id_b);
 
 										if !client.host_keys.is_host_trusted(h_id) {
 											*client.state.lock() = None;
@@ -830,7 +831,7 @@ impl ECDHSnd {
 }
 
 struct ECDHRcv {
-	hid: Hash,
+	hid: HostID,
 	public: PublicKey,
 	random: Vec<u8>,
 }
@@ -842,7 +843,7 @@ impl ECDHRcv {
 		}
 
 		let hid_b: [u8; 32] = buffer[1..33].try_into().unwrap();
-		let hid = Hash::from(hid_b);
+		let hid = HostID::from(hid_b);
 		let signature_len = buffer[33] as usize;
 		let signature_end = 34 + signature_len;
 
