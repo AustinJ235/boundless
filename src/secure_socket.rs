@@ -110,24 +110,29 @@ impl SecureSocketServer {
 
 		println!("[Socket-H]: Listening on {:?}", listen_addr);
 
-		let host_ret = Arc::new(Self {
+		let server_ret = Arc::new(Self {
 			host_keys,
 			socket,
 			clients: Mutex::new(HashMap::new()),
 			thrd_recv_h: Mutex::new(None),
 		});
 
-		let host = host_ret.clone();
+		let server_wk = Arc::downgrade(&server_ret);
 
-		*host_ret.thrd_recv_h.lock() = Some(thread::spawn(move || {
+		*server_ret.thrd_recv_h.lock() = Some(thread::spawn(move || {
 			let mut socket_buf = vec![0_u8; 65535];
 			let mut last_clients_check = Instant::now();
 
 			loop {
+				let server = match server_wk.upgrade() {
+					Some(some) => some,
+					None => return,
+				};
+
 				if last_clients_check.elapsed() > CLIENTS_CHECK_INTERVAL {
 					let mut call_disconnect = Vec::new();
 
-					host.clients.lock().retain(|client_id, client_state| {
+					server.clients.lock().retain(|client_id, client_state| {
 						if client_state.verified {
 							if client_state.ping_recv.elapsed() > PING_DISCONNECT {
 								println!(
@@ -164,13 +169,13 @@ impl SecureSocketServer {
 					});
 
 					for client_id in call_disconnect {
-						on_disconnect(&host, client_id);
+						on_disconnect(&server, client_id);
 					}
 
 					last_clients_check = Instant::now();
 				}
 
-				match host.socket.recv_from(&mut *socket_buf) {
+				match server.socket.recv_from(&mut *socket_buf) {
 					Ok((len, addr)) => {
 						if len < 1 {
 							continue;
@@ -179,7 +184,7 @@ impl SecureSocketServer {
 						match PacketType::from_repr(socket_buf[0]) {
 							Some(packet_type) => {
 								if packet_type == PacketType::ECDH {
-									let ecdh_rcv = match ECDHRcv::new(&host.host_keys, &socket_buf[0..len]) {
+									let ecdh_rcv = match ECDHRcv::new(&server.host_keys, &socket_buf[0..len]) {
 										Ok(ok) => ok,
 										Err(e) => {
 											println!(
@@ -190,9 +195,10 @@ impl SecureSocketServer {
 										},
 									};
 
-									let ecdh_snd = ECDHSnd::new(&host.host_keys);
+									let ecdh_snd = ECDHSnd::new(&server.host_keys);
 
-									if let Err(e) = host.socket.send_to(ecdh_snd.packet.as_slice(), addr.clone()) {
+									if let Err(e) = server.socket.send_to(ecdh_snd.packet.as_slice(), addr.clone())
+									{
 										println!(
 											"[Socket-H]: Rejected connection from {:?}: reason: send error: {}",
 											addr,
@@ -202,9 +208,9 @@ impl SecureSocketServer {
 									}
 
 									let client_id = ecdh_rcv.hid.clone();
-									let crypto = ecdh_snd.handshake(&host.host_keys, ecdh_rcv);
+									let crypto = ecdh_snd.handshake(&server.host_keys, ecdh_rcv);
 
-									host.clients.lock().insert(client_id, ClientState {
+									server.clients.lock().insert(client_id, ClientState {
 										addr,
 										verified: false,
 										ping_recv: Instant::now(),
@@ -225,7 +231,7 @@ impl SecureSocketServer {
 								let c_id = HostID::from(c_id_b);
 								let seq_b: [u8; 8] = socket_buf[33..41].try_into().unwrap();
 								let seq = u64::from_le_bytes(seq_b);
-								let mut clients = host.clients.lock();
+								let mut clients = server.clients.lock();
 
 								let mut client_state = match clients.get_mut(&c_id) {
 									Some(some) => some,
@@ -245,7 +251,7 @@ impl SecureSocketServer {
 										drop(client_state);
 										clients.remove(&c_id);
 										drop(clients);
-										on_disconnect(&host, c_id);
+										on_disconnect(&server, c_id);
 										continue;
 									},
 									Err(e) => {
@@ -290,7 +296,7 @@ impl SecureSocketServer {
 										r_msg.extend_from_slice(rand_hash.as_bytes());
 
 										if let Err(e) =
-											host.send_internal(&mut client_state, PacketType::Verify, r_msg)
+											server.send_internal(&mut client_state, PacketType::Verify, r_msg)
 										{
 											println!(
 												"[Socket-H]: Rejected connection from {:?}, reason: verify send \
@@ -308,12 +314,12 @@ impl SecureSocketServer {
 
 										drop(client_state);
 										drop(clients);
-										on_connect(&host, c_id);
+										on_connect(&server, c_id);
 										println!("[Socket-H]: Connection established with {:?}", addr);
 									},
 									PacketType::Ping => {
 										if let Err(e) =
-											host.send_internal(&mut client_state, PacketType::Ping, Vec::new())
+											server.send_internal(&mut client_state, PacketType::Ping, Vec::new())
 										{
 											println!("[Socket-H]: Failed to response ping to {:?}: {}", addr, e);
 											continue;
@@ -324,7 +330,7 @@ impl SecureSocketServer {
 									PacketType::Message => {
 										drop(client_state);
 										drop(clients);
-										recv_fn(&host, c_id, msg);
+										recv_fn(&server, c_id, msg);
 									},
 								}
 							},
@@ -344,7 +350,7 @@ impl SecureSocketServer {
 			}
 		}));
 
-		Ok(host_ret)
+		Ok(server_ret)
 	}
 
 	pub fn send(&self, client_id: HostID, data: Vec<u8>) -> Result<(), SendError> {
@@ -417,7 +423,7 @@ impl SecureSocketClient {
 			conn_cond: Condvar::new(),
 		});
 
-		let client = client_ret.clone();
+		let client_wk = Arc::downgrade(&client_ret);
 
 		*client_ret.thrd_recv_h.lock() = Some(thread::spawn(move || {
 			let mut socket_buf = vec![0_u8; 65535];
@@ -431,6 +437,11 @@ impl SecureSocketClient {
 			let mut renegotiating = false;
 
 			loop {
+				let client = match client_wk.upgrade() {
+					Some(some) => some,
+					None => return,
+				};
+
 				if !client_state_set {
 					if ecdh_data_op.is_none() {
 						ecdh_data_op = Some(ECDHSnd::new(&client.host_keys));

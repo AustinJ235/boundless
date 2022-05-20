@@ -8,6 +8,7 @@ pub mod message;
 pub mod platform;
 pub mod secure_socket;
 pub mod server;
+pub mod worm;
 
 use crate::host_keys::HostKeys;
 use std::io::Write;
@@ -236,8 +237,13 @@ fn main() {
 				println!("Unexpected Error: {}", e);
 			},
 		2 =>
-			if let Err(e) = server::Server::new(socket_addr.unwrap(), true).wait_for_exit() {
-				println!("Unexpected Error: {}", e);
+			match server::Server::new(socket_addr.unwrap(), true) {
+				Ok(server) =>
+					match server.wait_for_exit() {
+						Ok(_) => (),
+						Err(e) => println!("Server has exited: {}", e),
+					},
+				Err(e) => println!("Failed to start server: {}", e),
 			},
 		_ => unreachable!(),
 	}

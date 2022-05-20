@@ -1,10 +1,13 @@
-use crate::server::Capture;
-use crate::{KBKey, KBMSEvent, MSButton};
+use crate::message::Message;
+use crate::server::backend::InputSource;
+use crate::{KBKey, MSButton};
 use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{self, AtomicBool, AtomicIsize};
 use std::sync::Arc;
 use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 use u16cstr::u16cstr;
 use widestring::U16CStr;
 use windows::core::PCWSTR;
@@ -40,25 +43,25 @@ static HOOK_MOUSE_LL: AtomicIsize = AtomicIsize::new(0);
 static HOOK_KEYBOARD_LL: AtomicIsize = AtomicIsize::new(0);
 
 lazy_static! {
-	static ref EVENT_QUEUE: AtomicRingQueue<KBMSEvent> = AtomicRingQueue::with_capacity(1000);
+	static ref EVENT_QUEUE: AtomicRingQueue<Message> = AtomicRingQueue::with_capacity(1000);
 }
 
 unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 	if code >= 0 {
 		let event_op = match wparam.0 as u32 {
-			WM_LBUTTONDOWN => Some(KBMSEvent::MSPress(MSButton::Left)),
-			WM_LBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Left)),
-			WM_RBUTTONDOWN => Some(KBMSEvent::MSPress(MSButton::Right)),
-			WM_RBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Right)),
-			WM_MBUTTONDOWN => Some(KBMSEvent::MSPress(MSButton::Middle)),
-			WM_MBUTTONUP => Some(KBMSEvent::MSRelease(MSButton::Middle)),
+			WM_LBUTTONDOWN => Some(Message::MSPress(MSButton::Left)),
+			WM_LBUTTONUP => Some(Message::MSRelease(MSButton::Left)),
+			WM_RBUTTONDOWN => Some(Message::MSPress(MSButton::Right)),
+			WM_RBUTTONUP => Some(Message::MSRelease(MSButton::Right)),
+			WM_MBUTTONDOWN => Some(Message::MSPress(MSButton::Middle)),
+			WM_MBUTTONUP => Some(Message::MSRelease(MSButton::Middle)),
 			WM_MOUSEMOVE => None,
 			WM_MOUSEWHEEL =>
-				Some(KBMSEvent::MSScrollV(
+				Some(Message::MSScrollV(
 					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16 / 120,
 				)),
 			WM_MOUSEHWHEEL =>
-				Some(KBMSEvent::MSScrollH(
+				Some(Message::MSScrollH(
 					((*(lparam.0 as *const MSLLHOOKSTRUCT)).mouseData.0 as i32 >> 16) as i16 / 120,
 				)),
 			unknown => {
@@ -180,9 +183,9 @@ unsafe extern "system" fn keyboard_ll_hook(code: i32, wparam: WPARAM, lparam: LP
 		let info = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 		let pass_events = PASS_EVENTS.load(atomic::Ordering::SeqCst);
 
-		let event_op: Option<KBMSEvent> = match wparam.0 as u32 {
-			WM_KEYDOWN | WM_SYSKEYDOWN => vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBPress(v)),
-			WM_KEYUP | WM_SYSKEYUP => vkcode_to_kbkey(info.vkCode).map(|v| KBMSEvent::KBRelease(v)),
+		let event_op: Option<Message> = match wparam.0 as u32 {
+			WM_KEYDOWN | WM_SYSKEYDOWN => vkcode_to_kbkey(info.vkCode).map(|v| Message::KBPress(v)),
+			WM_KEYUP | WM_SYSKEYUP => vkcode_to_kbkey(info.vkCode).map(|v| Message::KBRelease(v)),
 			unknown => {
 				println!("Unknown WPARAM({}) for KEYBOARD_LL", unknown);
 				None
@@ -196,18 +199,20 @@ unsafe extern "system" fn keyboard_ll_hook(code: i32, wparam: WPARAM, lparam: LP
 		} else {
 			let event = event_op.unwrap();
 
-			if event == KBMSEvent::KBPress(KBKey::RightControl) {
+			if event == Message::KBPress(KBKey::RightControl) {
 				return LRESULT(1);
 			}
 
-			if event == KBMSEvent::KBRelease(KBKey::RightControl) {
+			if event == Message::KBRelease(KBKey::RightControl) {
 				PASS_EVENTS.store(!pass_events, atomic::Ordering::SeqCst);
 
+				/*
 				if pass_events {
-					event_queue_push(KBMSEvent::CaptureStart);
+					event_queue_push(Message::CaptureStart);
 				} else {
-					event_queue_push(KBMSEvent::CaptureEnd);
+					event_queue_push(Message::CaptureEnd);
 				}
+				*/
 
 				return LRESULT(1);
 			}
@@ -226,16 +231,21 @@ unsafe extern "system" fn wnd_proc_callback(window: HWND, msg: u32, wparam: WPAR
 	DefWindowProcW(window, msg, wparam, lparam)
 }
 
-pub struct WindowsCapture {}
+pub struct Win32Input {
+	thrd_h: Mutex<Option<JoinHandle<Result<(), String>>>>,
+	exit: Arc<AtomicBool>,
+}
 
-impl WindowsCapture {
-	pub fn new() -> Result<Box<dyn Capture>, String> {
+impl Win32Input {
+	pub fn new() -> Result<Box<dyn InputSource + Send + Sync>, String> {
 		let startup_result: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
 		let startup_result_ready = Arc::new(Condvar::new());
 		let thread_result = startup_result.clone();
 		let thread_result_ready = startup_result_ready.clone();
+		let exit = Arc::new(AtomicBool::new(false));
+		let thrd_exit = exit.clone();
 
-		thread::spawn(move || unsafe {
+		let thrd_h = thread::spawn(move || unsafe {
 			let target_win_class = WNDCLASSEXW {
 				cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
 				style: WNDCLASS_STYLES(0),
@@ -273,7 +283,7 @@ impl WindowsCapture {
 			if hwnd.0 == 0 {
 				*thread_result.lock() = Some(Err(String::from("Failed to create event target window.")));
 				thread_result_ready.notify_one();
-				return;
+				return Ok(());
 			}
 
 			let hook_mouse_ll = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_hook), HINSTANCE::default(), 0)
@@ -286,7 +296,7 @@ impl WindowsCapture {
 								 invalid.",
 							)));
 							thread_result_ready.notify_one();
-							return;
+							return Ok(());
 						},
 						false => ok,
 					},
@@ -294,7 +304,7 @@ impl WindowsCapture {
 					*thread_result.lock() =
 						Some(Err(format!("SetWindowsHookExW for WH_MOUSE_LL return an error: {}", e)));
 					thread_result_ready.notify_one();
-					return;
+					return Ok(());
 				},
 			};
 
@@ -309,7 +319,7 @@ impl WindowsCapture {
 								)));
 								thread_result_ready.notify_one();
 								UnhookWindowsHookEx(hook_mouse_ll);
-								return;
+								return Ok(());
 							},
 							false => ok,
 						},
@@ -318,7 +328,7 @@ impl WindowsCapture {
 							Some(Err(format!("SetWindowsHookExW for WH_KEYBOARD_LL return an error: {}", e)));
 						thread_result_ready.notify_one();
 						UnhookWindowsHookEx(hook_mouse_ll);
-						return;
+						return Ok(());
 					},
 				};
 
@@ -339,14 +349,19 @@ impl WindowsCapture {
 				thread_result_ready.notify_one();
 				UnhookWindowsHookEx(hook_mouse_ll);
 				UnhookWindowsHookEx(hook_keyboard_ll);
-				return;
+				return Ok(());
 			}
 
 			*thread_result.lock() = Some(Ok(()));
 			thread_result_ready.notify_one();
 			let mut message = MSG::default();
+			let mut error_op = None;
 
 			loop {
+				if thrd_exit.load(atomic::Ordering::SeqCst) {
+					break;
+				}
+
 				match GetMessageW(&mut message, HWND::default(), 0, 0).ok() {
 					Ok(_) =>
 						match message.message {
@@ -376,7 +391,7 @@ impl WindowsCapture {
 											if mouse_data.usFlags as u32 | MOUSE_MOVE_RELATIVE
 												== MOUSE_MOVE_RELATIVE
 											{
-												event_queue_push(KBMSEvent::MSMotion(
+												event_queue_push(Message::MSMotion(
 													mouse_data.lLastX,
 													mouse_data.lLastY,
 												));
@@ -390,7 +405,7 @@ impl WindowsCapture {
 							},
 						},
 					Err(e) => {
-						println!("[MSG]: ERROR: {}", e);
+						error_op = Some(format!("GetMessageW failed with {}", e));
 						break;
 					},
 				}
@@ -398,6 +413,11 @@ impl WindowsCapture {
 
 			UnhookWindowsHookEx(hook_mouse_ll);
 			UnhookWindowsHookEx(hook_keyboard_ll);
+
+			match error_op {
+				Some(some) => Err(some),
+				None => Ok(()),
+			}
 		});
 
 		let mut result_lk = startup_result.lock();
@@ -408,17 +428,55 @@ impl WindowsCapture {
 
 		result_lk.take().unwrap()?;
 
-		Ok(Box::new(Self {}))
+		Ok(Box::new(Self {
+			thrd_h: Mutex::new(Some(thrd_h)),
+			exit,
+		}))
+	}
+
+	fn check_thread(&self) -> Result<(), String> {
+		let mut handle = self.thrd_h.lock();
+
+		if handle.is_none() {
+			return Err(String::from("thread has previously exited."));
+		}
+
+		if handle.as_ref().unwrap().is_finished() {
+			return match handle.take().unwrap().join() {
+				Ok(ok) =>
+					match ok {
+						Ok(_) => Err(String::from("thread has exited sucessfully.")),
+						Err(e) => Err(format!("thread has exited with error: {}", e)),
+					},
+				Err(_) => Err(String::from("thread has panicked.")),
+			};
+		}
+
+		Ok(())
 	}
 }
 
-impl Capture for WindowsCapture {
-	fn event_queue(&self) -> &AtomicRingQueue<KBMSEvent> {
-		&EVENT_QUEUE
+impl InputSource for Win32Input {
+	fn next_message(&self, timeout: Option<Duration>) -> Result<Option<Message>, String> {
+		match EVENT_QUEUE.try_pop() {
+			Some(some) => Ok(Some(some)),
+			None => {
+				self.check_thread()?;
+
+				match timeout {
+					Some(timeout) => Ok(EVENT_QUEUE.pop_for(timeout)),
+					None => Ok(Some(EVENT_QUEUE.pop())),
+				}
+			},
+		}
+	}
+
+	fn exit(&self) {
+		self.exit.store(true, atomic::Ordering::SeqCst);
 	}
 }
 
-fn event_queue_push(event: KBMSEvent) {
+fn event_queue_push(event: Message) {
 	let mut push_ev = event;
 
 	loop {

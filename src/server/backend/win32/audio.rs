@@ -1,10 +1,12 @@
-use crate::server::AudioPlayback;
+use crate::message::Message;
+use crate::server::backend::AudioEndpoint;
 use crate::AudioStreamInfo;
 use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -24,16 +26,19 @@ pub struct WASAPIPlayback {
 	audio_chunks: Arc<AtomicRingQueue<Vec<f32>>>,
 	thrd_handle: JoinHandle<Result<(), String>>,
 	stream_info: AudioStreamInfo,
+	exit: Arc<AtomicBool>,
 }
 
 impl WASAPIPlayback {
-	pub fn new() -> Result<Box<dyn AudioPlayback + Send>, String> {
+	pub fn new() -> Result<Box<dyn AudioEndpoint + Send + Sync>, String> {
 		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
 		let thrd_audio_chunks = audio_chunks.clone();
 		let init_res: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> = Arc::new(Mutex::new(None));
 		let init_cond: Arc<Condvar> = Arc::new(Condvar::new());
 		let thrd_init_res = init_res.clone();
 		let thrd_init_cond = init_cond.clone();
+		let exit = Arc::new(AtomicBool::new(false));
+		let thrd_exit = exit.clone();
 
 		let thrd_handle: JoinHandle<Result<(), String>> = thread::spawn(move || unsafe {
 			if let Err(e) = COM_INIT.with(|com_init_ref| -> Result<(), String> {
@@ -153,6 +158,10 @@ impl WASAPIPlayback {
 			);
 
 			loop {
+				if thrd_exit.load(atomic::Ordering::SeqCst) {
+					return Ok(());
+				}
+
 				let padding = audio_client
 					.GetCurrentPadding()
 					.map_err(|e| format!("IAudioClient::GetCurrentPadding(): {:?}", e))?;
@@ -244,36 +253,40 @@ impl WASAPIPlayback {
 			audio_chunks,
 			stream_info,
 			thrd_handle,
+			exit,
 		}))
 	}
 }
 
-impl AudioPlayback for WASAPIPlayback {
-	fn push_chunk(&self, chunk: Vec<f32>) -> Result<bool, ()> {
-		match self.thrd_handle.is_finished() {
-			true => Err(()),
-			false =>
-				match self.audio_chunks.try_push(chunk) {
-					Ok(_) => Ok(false),
-					Err(chunk) => {
-						self.audio_chunks.push_overwrite(chunk);
-						Ok(true)
-					},
+impl AudioEndpoint for WASAPIPlayback {
+	// TODO: join thread and get error
+	fn send_message(&self, message: Message) -> Result<(), String> {
+		if self.thrd_handle.is_finished() {
+			return Err(format!("thread has exited"));
+		}
+
+		match message {
+			Message::AudioChunk {
+				data,
+				channels,
+				sample_rate,
+			} =>
+				if self.stream_info.channels != channels || self.stream_info.sample_rate != sample_rate {
+					println!(
+						"[Audio]: Can't play back incoming audio. Receiving {} channels at {} hz, expecting {} \
+						 channels at {} hz.",
+						channels, sample_rate, self.stream_info.channels, self.stream_info.sample_rate
+					);
+				} else {
+					self.audio_chunks.push_overwrite(data);
 				},
+			_ => (),
 		}
+
+		Ok(())
 	}
 
-	fn stream_info(&self) -> Result<AudioStreamInfo, ()> {
-		match self.thrd_handle.is_finished() {
-			true => Err(()),
-			false => Ok(self.stream_info.clone()),
-		}
-	}
-
-	fn exit(self) -> Result<(), String> {
-		match self.thrd_handle.join() {
-			Ok(ok) => ok,
-			Err(_) => Err(String::from("thread panicked.")),
-		}
+	fn exit(&self) {
+		self.exit.store(true, atomic::Ordering::SeqCst);
 	}
 }
