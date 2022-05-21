@@ -26,7 +26,7 @@ pub type SSCOnDisconnect = Box<dyn FnMut(&Arc<SecureSocketClient>) + Send>;
 // Interval at which the client sends pings.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 // Max duration from previous ping before server disconnects client.
-const PING_DISCONNECT: Duration = Duration::from_secs(5);
+const PING_DISCONNECT: Duration = Duration::from_secs(6);
 // Max duration from start of handshake before server disconnects client.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 // Interval at which the client does a handshake.

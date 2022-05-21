@@ -156,7 +156,6 @@ impl Client {
 	}
 
 	fn send_message(&self, message: Message) -> bool {
-		println!("Sending {:?}", message);
 		// TODO: disconnect on error?
 		self.socket.send(message.encode()).is_ok()
 	}
