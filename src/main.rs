@@ -232,7 +232,7 @@ fn main() {
 
 	match mode {
 		1 =>
-			match client::Client::new(socket_addr.unwrap(), true) {
+			match client::Client::new(socket_addr.unwrap(), false) {
 				Ok(client) =>
 					match client.wait_for_exit() {
 						Ok(_) => (),
@@ -241,7 +241,7 @@ fn main() {
 				Err(e) => println!("Failed to start client: {}", e),
 			},
 		2 =>
-			match server::Server::new(socket_addr.unwrap(), true) {
+			match server::Server::new(socket_addr.unwrap(), false) {
 				Ok(server) =>
 					match server.wait_for_exit() {
 						Ok(_) => (),

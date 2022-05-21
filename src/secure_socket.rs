@@ -343,7 +343,7 @@ impl SecureSocketServer {
 					},
 					Err(e) =>
 						match e.kind() {
-							std::io::ErrorKind::TimedOut => (),
+							std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => (),
 							kind => println!("[Socket-H]: Failed to receive packet: {}", kind),
 						},
 				}
@@ -646,8 +646,10 @@ impl SecureSocketClient {
 												client_state.verified = true;
 												client_state_verified = true;
 												handshake_last = Instant::now();
+												ping_recv = Instant::now();
 												client.conn_cond.notify_all();
 												drop(client_state);
+												drop(client_state_gu);
 												on_connect(&client);
 												println!("[Socket-C]: Connection is established to the host.");
 											},
@@ -668,7 +670,7 @@ impl SecureSocketClient {
 					},
 					Err(e) =>
 						match e.kind() {
-							std::io::ErrorKind::TimedOut =>
+							std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock =>
 								if !client_state_set {
 									thread::sleep(Duration::from_secs(1));
 								},

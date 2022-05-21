@@ -3,10 +3,11 @@ pub mod backend;
 use self::backend::{new_audio_source, new_input_endpoint, AudioSource, InputEndpoint};
 use crate::host_keys::HostKeys;
 use crate::message::Message;
-use crate::secure_socket::{HostID, SSCOnConnect, SSCOnDisconnect, SSCRecvFn, SecureSocketClient};
+use crate::secure_socket::{SSCOnConnect, SSCOnDisconnect, SSCRecvFn, SecureSocketClient};
 use crate::worm::Worm;
 use parking_lot::{Condvar, Mutex};
 use std::net::SocketAddr;
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,6 +19,7 @@ pub struct Client {
 	audio_snd_h: Option<JoinHandle<()>>,
 	error: Mutex<Option<String>>,
 	error_cond: Condvar,
+	send_audio: AtomicBool,
 }
 
 impl Client {
@@ -69,9 +71,35 @@ impl Client {
 		});
 
 		let socket = SecureSocketClient::connect(host_keys, connect_to, on_receive, on_connect, on_disconnect)?;
+		let client_wk = Arc::downgrade(&client);
 
 		let audio_snd_h = if audio_enable {
-			Some(thread::spawn(move || {}))
+			Some(thread::spawn(move || {
+				loop {
+					let worm = match client_wk.upgrade() {
+						Some(worm) => worm,
+						None => return,
+					};
+
+					let client = match worm.blocking_read_timeout(Duration::from_millis(500)) {
+						Ok(ok) => ok,
+						Err(_) => return,
+					};
+
+					match client.audio_source.as_ref().unwrap().next_message(Some(Duration::from_millis(500))) {
+						Ok(message_op) =>
+							if let Some(message) = message_op {
+								if client.send_audio.load(atomic::Ordering::SeqCst) {
+									client.send_message(message);
+								}
+							},
+						Err(e) => {
+							client.signal_error(format!("Failed to receive audio: {}", e));
+							break;
+						},
+					}
+				}
+			}))
 		} else {
 			None
 		};
@@ -83,25 +111,54 @@ impl Client {
 			audio_snd_h,
 			error: Mutex::new(None),
 			error_cond: Condvar::new(),
+			send_audio: AtomicBool::new(false),
 		});
 
 		Ok(client)
 	}
 
 	fn on_connect(&self) {
-		todo!()
+		self.send_message(Message::Support {
+			audio: self.audio_source.is_some(),
+		});
 	}
 
 	fn on_disconnect(&self) {
-		todo!()
+		self.send_audio.store(false, atomic::Ordering::SeqCst);
 	}
 
 	fn on_receive(&self, data: Vec<u8>) {
-		todo!()
+		match Message::decode(data) {
+			Some(message) =>
+				match message {
+					Message::Support {
+						audio,
+					} => {
+						self.send_audio.store(audio, atomic::Ordering::SeqCst);
+					},
+					message @ Message::AudioChunk {
+						..
+					} => {
+						println!("Received unexpected message from server: {:?}", message);
+						return;
+					},
+					message =>
+						match self.input_endpoint.send_message(message) {
+							Ok(_) => (),
+							Err(e) => self.signal_error(format!("Failed to send message to input: {}", e)),
+						},
+				},
+			None => {
+				println!("Received invalid message from server.");
+				return;
+			},
+		};
 	}
 
 	fn send_message(&self, message: Message) -> bool {
-		todo!()
+		println!("Sending {:?}", message);
+		// TODO: disconnect on error?
+		self.socket.send(message.encode()).is_ok()
 	}
 
 	fn signal_error(&self, e: String) {
