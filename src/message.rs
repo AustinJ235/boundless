@@ -212,7 +212,7 @@ impl Message {
 					return None;
 				}
 
-				let mut data_bytes = enc.split_off(7).into_iter();
+				let mut data_bytes = enc.split_off(6).into_iter();
 				let mut data = Vec::with_capacity(data_len);
 
 				for _ in 0..data_len {
