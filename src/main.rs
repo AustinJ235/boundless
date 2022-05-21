@@ -33,6 +33,8 @@ fn display_usage() {
 	println!("    Distrust a public key of another host.");
 	println!("  --trusted");
 	println!("    List all public keys trusted on this system.");
+	println!("  --enable-audio");
+	println!("    Enables audio support. Both client and server need this flag.");
 }
 
 fn main() {
@@ -40,6 +42,7 @@ fn main() {
 	let mut args = std::env::args();
 	args.next().unwrap();
 	let mut socket_addr: Option<SocketAddr> = None;
+	let mut enable_audio = false;
 
 	loop {
 		let arg = match args.next() {
@@ -221,6 +224,9 @@ fn main() {
 
 				return;
 			},
+			"--enable-audio" => {
+				enable_audio = true;
+			},
 			_ => (),
 		}
 	}
@@ -232,7 +238,7 @@ fn main() {
 
 	match mode {
 		1 =>
-			match client::Client::new(socket_addr.unwrap(), false) {
+			match client::Client::new(socket_addr.unwrap(), enable_audio) {
 				Ok(client) =>
 					match client.wait_for_exit() {
 						Ok(_) => (),
@@ -241,7 +247,7 @@ fn main() {
 				Err(e) => println!("Failed to start client: {}", e),
 			},
 		2 =>
-			match server::Server::new(socket_addr.unwrap(), false) {
+			match server::Server::new(socket_addr.unwrap(), enable_audio) {
 				Ok(server) =>
 					match server.wait_for_exit() {
 						Ok(_) => (),
