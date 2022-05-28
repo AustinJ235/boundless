@@ -3,7 +3,7 @@ pub mod backend;
 use self::backend::{new_audio_endpoint, new_input_source, AudioEndpoint, InputSource};
 use crate::host_keys::HostKeys;
 use crate::message::{Message, MessageTy};
-use crate::secure_socket::{HostID, SSSOnConnect, SSSOnDisconnect, SSSRecvFn, SecureSocketServer};
+use crate::socket::{HostID, OnConnectFn, OnDisconnectFn, OnReceiveFn, SecureSocket};
 use crate::worm::Worm;
 use parking_lot::{Condvar, Mutex};
 use std::net::SocketAddr;
@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub struct Server {
-	socket: Arc<SecureSocketServer>,
+	socket: Arc<SecureSocket>,
 	input_source: Box<dyn InputSource + Send + Sync>,
 	audio_endpoint: Option<Box<dyn AudioEndpoint + Send + Sync>>,
 	client_id: Worm<HostID>,
@@ -34,7 +34,7 @@ impl Server {
 		};
 
 		let server_wk = Arc::downgrade(&server);
-		let on_receive: SSSRecvFn = Box::new(move |_, host_id, data| {
+		let on_receive: OnReceiveFn = Box::new(move |_, host_id, data| {
 			match server_wk.upgrade() {
 				Some(server_worm) =>
 					match server_worm.blocking_read_timeout(Duration::from_millis(500)) {
@@ -46,7 +46,7 @@ impl Server {
 		});
 
 		let server_wk = Arc::downgrade(&server);
-		let on_connect: SSSOnConnect = Box::new(move |_, host_id| {
+		let on_connect: OnConnectFn = Box::new(move |_, host_id| {
 			match server_wk.upgrade() {
 				Some(server_worm) =>
 					match server_worm.blocking_read_timeout(Duration::from_millis(500)) {
@@ -58,7 +58,7 @@ impl Server {
 		});
 
 		let server_wk = Arc::downgrade(&server);
-		let on_disconnect: SSSOnDisconnect = Box::new(move |_, host_id| {
+		let on_disconnect: OnDisconnectFn = Box::new(move |_, host_id| {
 			match server_wk.upgrade() {
 				Some(server_worm) =>
 					match server_worm.blocking_read_timeout(Duration::from_millis(500)) {
@@ -69,7 +69,8 @@ impl Server {
 			}
 		});
 
-		let socket = SecureSocketServer::listen(host_keys, listen_addr, on_receive, on_connect, on_disconnect)?;
+		let socket = SecureSocket::listen(host_keys, listen_addr, on_receive, on_connect, on_disconnect)
+			.map_err(|e| format!("Failed to create socket: {:?}", e))?;
 		let server_wk = Arc::downgrade(&server);
 
 		let input_snd_h = thread::spawn(move || {
@@ -171,7 +172,7 @@ impl Server {
 	fn send_message(&self, message: Message) -> bool {
 		match self.client_id.try_read() {
 			Ok(client_id) =>
-				match self.socket.send(client_id.clone(), message.encode()) {
+				match self.socket.send_to(message.encode(), client_id.clone()) {
 					Ok(_) => true,
 					Err(_) => false, // TODO: check if server should disconnect client?
 				},

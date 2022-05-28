@@ -3,7 +3,7 @@ pub mod backend;
 use self::backend::{new_audio_source, new_input_endpoint, AudioSource, InputEndpoint};
 use crate::host_keys::HostKeys;
 use crate::message::Message;
-use crate::secure_socket::{SSCOnConnect, SSCOnDisconnect, SSCRecvFn, SecureSocketClient};
+use crate::socket::{OnConnectFn, OnDisconnectFn, OnReceiveFn, SecureSocket};
 use crate::worm::Worm;
 use parking_lot::{Condvar, Mutex};
 use std::net::SocketAddr;
@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub struct Client {
-	socket: Arc<SecureSocketClient>,
+	socket: Arc<SecureSocket>,
 	input_endpoint: Box<dyn InputEndpoint + Send + Sync>,
 	audio_source: Option<Box<dyn AudioSource + Send + Sync>>,
 	audio_snd_h: Option<JoinHandle<()>>,
@@ -35,7 +35,7 @@ impl Client {
 		};
 
 		let client_wk = Arc::downgrade(&client);
-		let on_receive: SSCRecvFn = Box::new(move |_, data| {
+		let on_receive: OnReceiveFn = Box::new(move |_, _, data| {
 			match client_wk.upgrade() {
 				Some(client_worm) =>
 					match client_worm.blocking_read_timeout(Duration::from_millis(500)) {
@@ -47,7 +47,7 @@ impl Client {
 		});
 
 		let client_wk = Arc::downgrade(&client);
-		let on_connect: SSCOnConnect = Box::new(move |_| {
+		let on_connect: OnConnectFn = Box::new(move |_, _| {
 			match client_wk.upgrade() {
 				Some(client_worm) =>
 					match client_worm.blocking_read_timeout(Duration::from_millis(500)) {
@@ -59,7 +59,7 @@ impl Client {
 		});
 
 		let client_wk = Arc::downgrade(&client);
-		let on_disconnect: SSCOnDisconnect = Box::new(move |_| {
+		let on_disconnect: OnDisconnectFn = Box::new(move |_, _| {
 			match client_wk.upgrade() {
 				Some(client_worm) =>
 					match client_worm.blocking_read_timeout(Duration::from_millis(500)) {
@@ -70,7 +70,8 @@ impl Client {
 			}
 		});
 
-		let socket = SecureSocketClient::connect(host_keys, connect_to, on_receive, on_connect, on_disconnect)?;
+		let socket = SecureSocket::connect(host_keys, connect_to, on_receive, on_connect, on_disconnect)
+			.map_err(|e| format!("Failed to create socket: {:?}", e))?;
 		let client_wk = Arc::downgrade(&client);
 
 		let audio_snd_h = if audio_enable {
