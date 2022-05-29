@@ -18,6 +18,11 @@ Boundless is yet another keyboard / mouse sharing project. It is mainly implemen
 - Start the client via ``--client SERVER_ADDR:1504``
 - Switch input on the host running the server with ``Right Ctrl``
 
+##### Audio Support
+- On each host the argument `--enable-audio` must be used.
+- On the client (linux) a null sink needs to be created.
+  - `pactl load-module module-null-sink sink_name=boundless`
+
 ##### Why is Windows the Server?
 - More robust in capturing input. UInput can be flacky when it come to capturing input. Causing keys to remained pressed for example.
 - Some games simply don't work with virtual inputs or ban you for using them.

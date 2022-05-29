@@ -87,7 +87,7 @@ impl Client {
 						Err(_) => return,
 					};
 
-					match client.audio_source.as_ref().unwrap().next_message(Some(Duration::from_millis(500))) {
+					match client.audio_source.as_ref().unwrap().next_message(Duration::from_millis(500)) {
 						Ok(message_op) =>
 							if let Some(message) = message_op {
 								if client.send_audio.load(atomic::Ordering::SeqCst) {
@@ -119,7 +119,7 @@ impl Client {
 	}
 
 	fn on_connect(&self) {
-		self.send_message(Message::Support {
+		self.send_message(Message::ClientFeatures {
 			audio: self.audio_source.is_some(),
 		});
 	}
@@ -132,11 +132,37 @@ impl Client {
 		match Message::decode(data) {
 			Some(message) =>
 				match message {
-					Message::Support {
+					Message::ServerFeatures {
 						audio,
-					} => {
-						self.send_audio.store(audio, atomic::Ordering::SeqCst);
-					},
+					} =>
+						match &self.audio_source {
+							Some(audio_source) =>
+								match audio {
+									Some(stream_info) => {
+										self.send_audio.store(true, atomic::Ordering::SeqCst);
+
+										if let Err(e) = audio_source.set_stream_info(Some(stream_info)) {
+											self.signal_error(format!(
+												"[Audio]: Failed to sent stream info: {}",
+												e
+											));
+										}
+									},
+									None => {
+										self.send_audio.store(false, atomic::Ordering::SeqCst);
+
+										if let Err(e) = audio_source.set_stream_info(None) {
+											self.signal_error(format!(
+												"[Audio]: Failed to sent stream info: {}",
+												e
+											));
+										}
+									},
+								},
+							None => {
+								self.send_audio.store(false, atomic::Ordering::SeqCst);
+							},
+						},
 					message @ Message::AudioChunk {
 						..
 					} => {
@@ -157,7 +183,6 @@ impl Client {
 	}
 
 	fn send_message(&self, message: Message) -> bool {
-		// TODO: disconnect on error?
 		self.socket.send(message.encode()).is_ok()
 	}
 

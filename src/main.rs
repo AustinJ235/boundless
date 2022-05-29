@@ -259,12 +259,6 @@ fn main() {
 	}
 }
 
-#[derive(Debug, Clone)]
-pub struct AudioStreamInfo {
-	pub channels: u8,
-	pub sample_rate: u16,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, FromRepr, EnumIter)]
 #[repr(u8)]
 pub enum MSButton {
