@@ -14,6 +14,7 @@ pub trait InputSource {
 
 pub trait AudioEndpoint {
 	fn send_message(&self, message: Message) -> Result<(), String>;
+	fn stream_info(&self) -> (u8, u16);
 	fn exit(&self);
 }
 

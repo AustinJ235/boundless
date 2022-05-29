@@ -119,7 +119,7 @@ impl Client {
 	}
 
 	fn on_connect(&self) {
-		self.send_message(Message::Support {
+		self.send_message(Message::ClientFeatures {
 			audio: self.audio_source.is_some(),
 		});
 	}
@@ -132,11 +132,25 @@ impl Client {
 		match Message::decode(data) {
 			Some(message) =>
 				match message {
-					Message::Support {
+					Message::ServerFeatures {
 						audio,
-					} => {
-						self.send_audio.store(audio, atomic::Ordering::SeqCst);
-					},
+					} =>
+						match &self.audio_source {
+							Some(audio_source) =>
+								match audio {
+									Some(stream_info) => {
+										self.send_audio.store(true, atomic::Ordering::SeqCst);
+										audio_source.set_stream_info(Some(stream_info));
+									},
+									None => {
+										self.send_audio.store(false, atomic::Ordering::SeqCst);
+										audio_source.set_stream_info(None);
+									},
+								},
+							None => {
+								self.send_audio.store(false, atomic::Ordering::SeqCst);
+							},
+						},
 					message @ Message::AudioChunk {
 						..
 					} => {

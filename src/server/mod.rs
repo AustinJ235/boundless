@@ -151,9 +151,9 @@ impl Server {
 		};
 
 		match message.ty() {
-			MessageTy::Support => {
-				self.send_message(Message::Support {
-					audio: self.audio_endpoint.is_some(),
+			MessageTy::ClientFeatures => {
+				self.send_message(Message::ServerFeatures {
+					audio: self.audio_endpoint.as_ref().map(|endpoint| endpoint.stream_info()),
 				});
 			},
 			MessageTy::AudioChunk =>

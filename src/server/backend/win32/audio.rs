@@ -1,6 +1,5 @@
 use crate::message::Message;
 use crate::server::backend::AudioEndpoint;
-use crate::AudioStreamInfo;
 use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::cell::RefCell;
@@ -25,7 +24,7 @@ thread_local! {
 pub struct WASAPIPlayback {
 	audio_chunks: Arc<AtomicRingQueue<Vec<f32>>>,
 	thrd_handle: JoinHandle<Result<(), String>>,
-	stream_info: AudioStreamInfo,
+	stream_info: (u8, u16),
 	exit: Arc<AtomicBool>,
 }
 
@@ -33,7 +32,7 @@ impl WASAPIPlayback {
 	pub fn new() -> Result<Box<dyn AudioEndpoint + Send + Sync>, String> {
 		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
 		let thrd_audio_chunks = audio_chunks.clone();
-		let init_res: Arc<Mutex<Option<Result<AudioStreamInfo, String>>>> = Arc::new(Mutex::new(None));
+		let init_res: Arc<Mutex<Option<Result<(u8, u16), String>>>> = Arc::new(Mutex::new(None));
 		let init_cond: Arc<Condvar> = Arc::new(Condvar::new());
 		let thrd_init_res = init_res.clone();
 		let thrd_init_cond = init_cond.clone();
@@ -141,11 +140,7 @@ impl WASAPIPlayback {
 				return Ok(());
 			}
 
-			*thrd_init_res.lock() = Some(Ok(AudioStreamInfo {
-				channels: nChannels as _,
-				sample_rate: nSamplesPerSec as _,
-			}));
-
+			*thrd_init_res.lock() = Some(Ok((nChannels as _, nSamplesPerSec as _)));
 			thrd_init_cond.notify_one();
 			let render_client = mbu_render_client.assume_init();
 			let mut has_started = false;
@@ -271,11 +266,11 @@ impl AudioEndpoint for WASAPIPlayback {
 				channels,
 				sample_rate,
 			} =>
-				if self.stream_info.channels != channels || self.stream_info.sample_rate != sample_rate {
+				if self.stream_info.0 != channels || self.stream_info.1 != sample_rate {
 					println!(
 						"[Audio]: Can't play back incoming audio. Receiving {} channels at {} hz, expecting {} \
 						 channels at {} hz.",
-						channels, sample_rate, self.stream_info.channels, self.stream_info.sample_rate
+						channels, sample_rate, self.stream_info.0, self.stream_info.1
 					);
 				} else {
 					self.audio_chunks.push_overwrite(data);
@@ -284,6 +279,10 @@ impl AudioEndpoint for WASAPIPlayback {
 		}
 
 		Ok(())
+	}
+
+	fn stream_info(&self) -> (u8, u16) {
+		self.stream_info
 	}
 
 	fn exit(&self) {
