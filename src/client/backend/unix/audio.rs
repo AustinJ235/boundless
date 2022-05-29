@@ -4,16 +4,16 @@ use atomicring::AtomicRingQueue;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use std::sync::mpsc::{self, SyncSender, TryRecvError, RecvTimeoutError};
 
 pub struct PulseAudioSource {
 	queue: Arc<AtomicRingQueue<Message>>,
 	thrd_h: JoinHandle<()>,
-	info_snd: SyncSender<Option<(u8, u16)>>,
+	info_snd: SyncSender<Option<(u8, u32)>>,
 }
 
 impl PulseAudioSource {
@@ -23,7 +23,7 @@ impl PulseAudioSource {
 		let (info_snd, info_rcv) = mpsc::sync_channel(3);
 
 		let thrd_h = thread::spawn(move || {
-			let mut stream_info: Option<(u8, u16)> = None;
+			let mut stream_info: Option<(u8, u32)> = None;
 
 			'init: loop {
 				loop {
@@ -70,24 +70,28 @@ impl PulseAudioSource {
 					Ok(ok) => ok,
 					Err(e) => {
 						// TODO: Check if a remap or ressample is needed?
-						println!("[Audio]: Failed to initiate stream with ({} Channels @ {} Hz): {}", spec.channels, spec.rate, e);
+						println!(
+							"[Audio]: Failed to initiate stream with ({} Channels @ {} Hz): {}",
+							spec.channels, spec.rate, e
+						);
 						stream_info = None;
 						continue;
-					}
+					},
 				};
 
 				let buffer_size = (spec.rate as f32 / 1000.0 * 10.0 * spec.channels as f32).trunc() as usize;
 				let mut buffer = vec![0_u8; buffer_size * spec.format.size()];
 				let mut mapped: Vec<f32> = Vec::with_capacity(buffer_size);
-
 				println!("[Audio]: Monitoring at {} channels @ {} Hz", spec.channels, spec.rate);
 
 				loop {
+					let mut info_updated = false;
 					let mut new_info = None;
 
 					loop {
 						match info_rcv.try_recv() {
 							Ok(info_op) => {
+								info_updated = true;
 								new_info = info_op;
 								break;
 							},
@@ -96,7 +100,7 @@ impl PulseAudioSource {
 						}
 					}
 
-					if new_info != stream_info {
+					if info_updated && new_info != stream_info {
 						stream_info = new_info;
 						continue 'init;
 					}
@@ -169,10 +173,10 @@ impl AudioSource for PulseAudioSource {
 		Ok(self.queue.pop_for(timeout))
 	}
 
-	fn set_stream_info(&self, stream_info: Option<(u8, u16)>) -> Result<(), String> {
+	fn set_stream_info(&self, stream_info: Option<(u8, u32)>) -> Result<(), String> {
 		match self.info_snd.send(stream_info) {
 			Ok(_) => Ok(()),
-			Err(_) => Err(String::from("thread has exited"))
+			Err(_) => Err(String::from("thread has exited")),
 		}
 	}
 

@@ -134,32 +134,35 @@ impl Client {
 				match message {
 					Message::ServerFeatures {
 						audio,
-					} => {
-						println!("Audio: {:?}", audio);
-
+					} =>
 						match &self.audio_source {
 							Some(audio_source) =>
 								match audio {
 									Some(stream_info) => {
 										self.send_audio.store(true, atomic::Ordering::SeqCst);
-										
+
 										if let Err(e) = audio_source.set_stream_info(Some(stream_info)) {
-											self.signal_error(format!("[Audio]: Failed to sent stream info: {}", e));
+											self.signal_error(format!(
+												"[Audio]: Failed to sent stream info: {}",
+												e
+											));
 										}
 									},
 									None => {
 										self.send_audio.store(false, atomic::Ordering::SeqCst);
 
 										if let Err(e) = audio_source.set_stream_info(None) {
-											self.signal_error(format!("[Audio]: Failed to sent stream info: {}", e));
+											self.signal_error(format!(
+												"[Audio]: Failed to sent stream info: {}",
+												e
+											));
 										}
 									},
 								},
 							None => {
 								self.send_audio.store(false, atomic::Ordering::SeqCst);
 							},
-						}
-					},
+						},
 					message @ Message::AudioChunk {
 						..
 					} => {
