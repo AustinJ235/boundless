@@ -22,7 +22,7 @@ pub enum Message {
 		audio: bool,
 	},
 	ServerFeatures {
-		audio: Option<(u8, u16)>,
+		audio: Option<(u8, u32)>,
 	},
 	MSPress(MSButton),
 	MSRelease(MSButton),
@@ -33,7 +33,7 @@ pub enum Message {
 	KBRelease(KBKey),
 	AudioChunk {
 		channels: u8,
-		sample_rate: u16,
+		sample_rate: u32,
 		data: Vec<f32>,
 	},
 }
@@ -113,7 +113,7 @@ impl Message {
 			} =>
 				match audio {
 					Some((c, sr)) => {
-						enc.push(0);
+						enc.push(1);
 						enc.push(c);
 						enc.extend_from_slice(&sr.to_le_bytes());
 					},
@@ -189,12 +189,12 @@ impl Message {
 					});
 				}
 
-				if enc.len() != 5 {
+				if enc.len() != 7 {
 					return None;
 				}
 
 				let c = enc[2];
-				let sr = u16::from_le_bytes(<[u8; 2]>::try_from(&enc[3..5]).unwrap());
+				let sr = u32::from_le_bytes(<[u8; 4]>::try_from(&enc[3..7]).unwrap());
 
 				Self::ServerFeatures {
 					audio: Some((c, sr)),
@@ -249,19 +249,19 @@ impl Message {
 				}
 			},
 			MessageTy::AudioChunk => {
-				if enc.len() < 6 {
+				if enc.len() < 8 {
 					return None;
 				}
 
 				let channels = enc[1];
-				let sample_rate = u16::from_le_bytes(<[u8; 2]>::try_from(&enc[2..4]).unwrap());
-				let data_len = u16::from_le_bytes(<[u8; 2]>::try_from(&enc[4..6]).unwrap()) as usize;
+				let sample_rate = u32::from_le_bytes(<[u8; 4]>::try_from(&enc[2..6]).unwrap());
+				let data_len = u16::from_le_bytes(<[u8; 2]>::try_from(&enc[6..8]).unwrap()) as usize;
 
-				if data_len == 0 || enc.len() - 6 != data_len * 4 {
+				if data_len == 0 || enc.len() - 8 != data_len * 4 {
 					return None;
 				}
 
-				let mut data_bytes = enc.split_off(6).into_iter();
+				let mut data_bytes = enc.split_off(8).into_iter();
 				let mut data = Vec::with_capacity(data_len);
 
 				for _ in 0..data_len {

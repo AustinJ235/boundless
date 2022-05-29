@@ -24,7 +24,7 @@ thread_local! {
 pub struct WASAPIPlayback {
 	audio_chunks: Arc<AtomicRingQueue<Vec<f32>>>,
 	thrd_handle: JoinHandle<Result<(), String>>,
-	stream_info: (u8, u16),
+	stream_info: (u8, u32),
 	exit: Arc<AtomicBool>,
 }
 
@@ -32,7 +32,7 @@ impl WASAPIPlayback {
 	pub fn new() -> Result<Box<dyn AudioEndpoint + Send + Sync>, String> {
 		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
 		let thrd_audio_chunks = audio_chunks.clone();
-		let init_res: Arc<Mutex<Option<Result<(u8, u16), String>>>> = Arc::new(Mutex::new(None));
+		let init_res: Arc<Mutex<Option<Result<(u8, u32), String>>>> = Arc::new(Mutex::new(None));
 		let init_cond: Arc<Condvar> = Arc::new(Condvar::new());
 		let thrd_init_res = init_res.clone();
 		let thrd_init_cond = init_cond.clone();
@@ -281,7 +281,7 @@ impl AudioEndpoint for WASAPIPlayback {
 		Ok(())
 	}
 
-	fn stream_info(&self) -> (u8, u16) {
+	fn stream_info(&self) -> (u8, u32) {
 		self.stream_info
 	}
 
