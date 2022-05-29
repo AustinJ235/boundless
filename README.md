@@ -28,10 +28,6 @@ Boundless is yet another keyboard / mouse sharing project. It is mainly implemen
 - Some games simply don't work with virtual inputs or ban you for using them.
 
 ##### What are some future goals?
-- Audio sharing
-  - Rought support currently with `--enable-audio`
-  - Pulseaudio must support 88200 hz
-  - Windows must be set at 88200 hz.
 - Clipboard sharing.
 
 ##### What are some other cool projects?
