@@ -126,6 +126,7 @@ impl Client {
 
 	fn on_disconnect(&self) {
 		self.send_audio.store(false, atomic::Ordering::SeqCst);
+		self.audio_source.as_ref().map(|audio_source| audio_source.set_stream_info(None));
 	}
 
 	fn on_receive(&self, data: Vec<u8>) {
