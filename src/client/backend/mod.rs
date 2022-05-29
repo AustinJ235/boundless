@@ -14,8 +14,8 @@ pub trait InputEndpoint {
 }
 
 pub trait AudioSource {
-	fn next_message(&self, timeout: Option<Duration>) -> Result<Option<Message>, String>;
-	fn set_stream_info(&self, stream_info: Option<(u8, u16)>);
+	fn next_message(&self, timeout: Duration) -> Result<Option<Message>, String>;
+	fn set_stream_info(&self, stream_info: Option<(u8, u16)>) -> Result<(), String>;
 	fn exit(&self);
 }
 

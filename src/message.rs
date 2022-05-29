@@ -179,7 +179,7 @@ impl Message {
 				}
 			},
 			MessageTy::ServerFeatures => {
-				if enc.len() != 2 {
+				if enc.len() < 2 {
 					return None;
 				}
 
