@@ -478,6 +478,23 @@ pub enum SSError {
 	NotConnected,
 }
 
+impl fmt::Display for SSError {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			Self::Bind(e) => write!(f, "failed to bind socket: {}", e),
+			Self::Send(e) => write!(f, "failed to send packet: {}", e),
+			Self::MaxSizeExceeded => write!(f, "packet too large"),
+			Self::Encrypt => write!(f, "encryption failed"),
+			Self::LateOrDuplicate => write!(f, "packet is late or a duplicate"),
+			Self::Decrypt => write!(f, "decryption failed"),
+			Self::Truncated => write!(f, "packet is truncated"),
+			Self::ClientOnlyMethod => write!(f, "method is only used with connect"),
+			Self::ServerOnlyMethod => write!(f, "method is only used with listen"),
+			Self::NotConnected => write!(f, "no active connection"),
+		}
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PacketType {
 	HdshkReq,
@@ -632,8 +649,8 @@ impl SecureSocket {
 							socket.peer.lock().retain(|peer_id, peer| {
 								if peer.last_ping_recv().elapsed() > PING_DISCONNECT {
 									println!(
-										"[SS-{}][Connection]: Connection lost to {}, reason: no ping received.",
-										mode, peer.addr
+										"[Socket]: Connection lost to {}, reason: no ping received.",
+										peer.addr
 									);
 									call_disconnect.push(peer_id.clone());
 									false
@@ -642,9 +659,9 @@ impl SecureSocket {
 										Some(inst) =>
 											if inst.elapsed() > HANDSHAKE_DISCONNECT {
 												println!(
-													"[SS-{}][Connection]: Connection lost to {}, reason: no \
-													 renegotiation received.",
-													mode, peer.addr
+													"[Socket]: Connection lost to {}, reason: no renegotiation \
+													 received.",
+													peer.addr
 												);
 												call_disconnect.push(peer_id.clone());
 												false
@@ -653,9 +670,8 @@ impl SecureSocket {
 											},
 										None => {
 											println!(
-												"[SS-{}][Connection]: Connection lost to {}, reason: no active \
-												 connection.",
-												mode, peer.addr
+												"[Socket]: Connection lost to {}, reason: no active connection.",
+												peer.addr
 											);
 											call_disconnect.push(peer_id.clone());
 											false
@@ -695,12 +711,11 @@ impl SecureSocket {
 									send_buf.append(&mut signature_bytes);
 									send_buf.append(&mut message);
 									peer.set_hdshk_sent();
-									println!("[SS-{}][Connection]: Connecting to {}.", mode, peer.addr);
+									println!("[Socket]: Attempting to connect to {}.", peer.addr);
 
 									if let Err(e) = udp_socket.send_to(&*send_buf, peer.addr) {
 										println!(
-											"[SS-{}][Connection]: Failed to send handshake to {}, reason: {}",
-											mode,
+											"[Socket]: Connection lost to {}, reason: failed to send packet: {}.",
 											peer.addr,
 											e.kind()
 										);
@@ -709,8 +724,8 @@ impl SecureSocket {
 							} else {
 								if peer.last_ping_recv().elapsed() > PING_DISCONNECT {
 									println!(
-										"[SS-{}][Connection]: Connection lost to {}, reason: no ping response.",
-										mode, peer.addr
+										"[Socket]: Connection lost to {}, reason: no ping received.",
+										peer.addr
 									);
 									peer.crypto.clear();
 
@@ -736,25 +751,8 @@ impl SecureSocket {
 									if let Err(e) =
 										socket.send_internal(addr, crypto, hdshk_id, PacketType::Ping, send_msg)
 									{
-										match e {
-											SSError::Encrypt => {
-												println!(
-													"[SS-{}][Connection]: Connection lost to {}, reason: failed \
-													 to send ping: encryption error.",
-													mode, addr
-												);
-												peer.crypto.clear();
-											},
-											SSError::Send(kind) => {
-												println!(
-													"[SS-{}][Connection]: Connection lost to {}, reason: failed \
-													 to send ping: {}",
-													mode, addr, kind
-												);
-												peer.crypto.clear();
-											},
-											_ => unreachable!(),
-										}
+										println!("[Socket]: Connection lost to {}, reason: {}.", peer.addr, e);
+										peer.crypto.clear();
 
 										if let Some(peer_id) = peer.take_peer_id() {
 											drop(peer);
@@ -770,9 +768,8 @@ impl SecureSocket {
 									if peer.hdshk_pending() {
 										if peer.last_hdshk_sent().elapsed() > HANDSHAKE_TIMEOUT {
 											println!(
-												"[SS-{}][Connection]: Connection lost to {}, reason: failed to \
-												 renegotiate connection.",
-												mode, peer.addr
+												"[Socket]: Connection lost to {}, reason: handshake timed out.",
+												peer.addr
 											);
 											peer.crypto.clear();
 
@@ -804,7 +801,7 @@ impl SecureSocket {
 										peer.set_hdshk_sent();
 										let addr = peer.addr.clone();
 										let (old_hdshk_id, old_crypto) = peer.latest_crypto().unwrap();
-										println!("[SS-{}][Connection]: Renegotiating with {}.", mode, addr);
+										println!("[Socket]: Renegotiating connection with {}.", addr);
 
 										if let Err(e) = socket.send_internal(
 											addr,
@@ -813,25 +810,8 @@ impl SecureSocket {
 											PacketType::EncHdshkReq,
 											message,
 										) {
-											match e {
-												SSError::Encrypt => {
-													println!(
-														"[SS-{}][Connection]: Connection lost to {}, reason: \
-														 renegotiation failed: encryption error.",
-														mode, addr
-													);
-													peer.crypto.clear();
-												},
-												SSError::Send(kind) => {
-													println!(
-														"[SS-{}][Connection]: Connection lost to {}, reason: \
-														 renegotiation failed: {}",
-														mode, addr, kind
-													);
-													peer.crypto.clear();
-												},
-												_ => unreachable!(),
-											}
+											println!("[Socket]: Connection lost to {}, reason: {}.", peer.addr, e);
+											peer.crypto.clear();
 
 											if let Some(peer_id) = peer.take_peer_id() {
 												drop(peer);
@@ -860,17 +840,16 @@ impl SecureSocket {
 							Some(PacketType::HdshkReq) => {
 								if mode != Mode::Server {
 									println!(
-										"[SS-{}][HdshkReq]: Rejected packet from {}, reason: not operating as \
-										 server.",
-										mode, addr
+										"[Socket]: Rejected HdshkReq from {}, reason: unexpected packet type.",
+										addr
 									);
 									continue;
 								}
 
 								if len < 34 {
 									println!(
-										"[SS-{}][HdshkReq]: Rejected packet from {}, reason: truncated (C1).",
-										mode, addr
+										"[Socket]: Rejected HdshkReq from {}, reason: packet is truncated (c1).",
+										addr
 									);
 									continue;
 								}
@@ -880,8 +859,8 @@ impl SecureSocket {
 
 								if len < signature_end {
 									println!(
-										"[SS-{}][HdshkReq]: Rejected packet from {}, reason: truncated (C2).",
-										mode, addr
+										"[Socket]: Rejected HdshkReq from {}, reason: packet is truncated (c2).",
+										addr
 									);
 									continue;
 								}
@@ -890,8 +869,8 @@ impl SecureSocket {
 
 								if len < signature_end + 64 {
 									println!(
-										"[SS-{}][HdshkReq]: Rejected packet from {}, reason: truncated (C3).",
-										mode, addr
+										"[Socket]: Rejected HdshkReq from {}, reason: packet is truncated (c3).",
+										addr
 									);
 									continue;
 								}
@@ -902,8 +881,8 @@ impl SecureSocket {
 								if let Err(e) = socket.keys.verify_message(peer_id, signature_bytes, message_bytes)
 								{
 									println!(
-										"[SS-{}][HdshkReq]: Rejected packet from {}, reason: unable to verify: {}",
-										mode, addr, e
+										"[Socket]: Rejected HdshkReq from {}, reason: verification failed: {}",
+										addr, e
 									);
 									continue;
 								}
@@ -914,8 +893,8 @@ impl SecureSocket {
 
 								if public_end > message_bytes.len() {
 									println!(
-										"[SS-{}][HdshkReq]: Rejected packet from {}, reason: truncated (C4).",
-										mode, addr
+										"[Socket]: Rejected HdshkReq from {}, reason: packet is truncated (c4).",
+										addr
 									);
 									continue;
 								}
@@ -925,9 +904,8 @@ impl SecureSocket {
 									Ok(ok) => ok,
 									Err(_) => {
 										println!(
-											"[SS-{}][HdshkReq]: Rejected packet from {}, reason: invalid public \
-											 key.",
-											mode, addr
+											"[Socket]: Rejected HdshkReq from {}, reason: invalid public key.",
+											addr
 										);
 										continue;
 									},
@@ -959,9 +937,8 @@ impl SecureSocket {
 									Ok((_, ok)) => ok,
 									Err(_) => {
 										println!(
-											"[SS-{}][HdshkReq]: Failed to send response to {}, reason: \
-											 encryption failed.",
-											mode, addr
+											"[Socket]: Rejected HdshkReq from {}, reason: encryption failed.",
+											addr
 										);
 										continue;
 									},
@@ -982,8 +959,8 @@ impl SecureSocket {
 
 								if let Err(e) = udp_socket.send_to(&*send_buf, &addr) {
 									println!(
-										"[SS-{}][HdshkReq]: Failed to send response to {}, reason: {}",
-										mode,
+										"[Socket]: Failed to send HdshkReq to {}, reason: failed to send packet: \
+										 {}",
 										addr,
 										e.kind()
 									);
@@ -1001,23 +978,22 @@ impl SecureSocket {
 								peer.crypto.insert(handshake_id, crypto);
 								peers.insert(peer_id, peer);
 								drop(peers);
-								println!("[SS-{}][Connection]: Accepted from {}.", mode, addr);
+								println!("[Socket]: Accepted connection with {}.", addr);
 								on_connect(&socket, peer_id);
 							},
 							Some(PacketType::HdshkRes) => {
 								if mode != Mode::Client {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: not operating as \
-										 client.",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: unexpected packet type.",
+										addr
 									);
 									continue;
 								}
 
 								if len < 34 {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: truncated (C1).",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: packet is truncated (c1).",
+										addr
 									);
 									continue;
 								}
@@ -1027,8 +1003,8 @@ impl SecureSocket {
 
 								if len < signature_end {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: truncated (C2).",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: packet is truncated (c2).",
+										addr
 									);
 									continue;
 								}
@@ -1037,8 +1013,8 @@ impl SecureSocket {
 
 								if len < signature_end + 17 {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: truncated (C3).",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: packet is truncated (c3).",
+										addr
 									);
 									continue;
 								}
@@ -1048,8 +1024,8 @@ impl SecureSocket {
 
 								if len < message_end {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: truncated (C4).",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: packet is truncated (c4).",
+										addr
 									);
 									continue;
 								}
@@ -1060,8 +1036,8 @@ impl SecureSocket {
 								if let Err(e) = socket.keys.verify_message(peer_id, signature_bytes, message_bytes)
 								{
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: unable to verify: {}",
-										mode, addr, e
+										"[Socket]: Rejected HdshkRes from {}, reason: verification failed: {}",
+										addr, e
 									);
 									continue;
 								}
@@ -1073,9 +1049,8 @@ impl SecureSocket {
 									Ok(ok) => ok,
 									Err(_) => {
 										println!(
-											"[SS-{}][HdshkRes]: Rejected packet from {}, reason: invalid public \
-											 key.",
-											mode, addr
+											"[Socket]: Rejected HdshkRes from {}, reason: invalid public key.",
+											addr
 										);
 										continue;
 									},
@@ -1086,9 +1061,8 @@ impl SecureSocket {
 									Some(some) => some,
 									None => {
 										println!(
-											"[SS-{}][HdshkRes]: Rejected packet from {}, reason: unknown \
-											 handshake (C1).",
-											mode, addr
+											"[Socket]: Rejected HdshkRes from {}, reason: handshake unknown (c1).",
+											addr
 										);
 										continue;
 									},
@@ -1096,8 +1070,8 @@ impl SecureSocket {
 
 								if addr != peer.addr {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: address mismatch.",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: address mismatch.",
+										addr
 									);
 									continue;
 								}
@@ -1106,9 +1080,8 @@ impl SecureSocket {
 									Some(some) => some,
 									None => {
 										println!(
-											"[SS-{}][HdshkRes]: Rejected packet from {}, reason: unknown \
-											 handshake (C2).",
-											mode, addr
+											"[Socket]: Rejected HdshkRes from {}, reason: handshake unknown (c2).",
+											addr
 										);
 										continue;
 									},
@@ -1130,9 +1103,8 @@ impl SecureSocket {
 									Ok(ok) => ok,
 									Err(_) => {
 										println!(
-											"[SS-{}][HdshkRes]: Rejected packet from {}, reason: test failed \
-											 (C1).",
-											mode, addr
+											"[Socket]: Rejected HdshkRes from {}, reason: test failed (c1).",
+											addr
 										);
 										continue;
 									},
@@ -1140,16 +1112,16 @@ impl SecureSocket {
 
 								if decrypted.len() != 64 {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: test failed (C2).",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: test failed (c2).",
+										addr
 									);
 									continue;
 								}
 
 								if hash(&decrypted[32..]) != <[u8; 32]>::try_from(&decrypted[0..32]).unwrap() {
 									println!(
-										"[SS-{}][HdshkRes]: Rejected packet from {}, reason: test failed (C3).",
-										mode, addr
+										"[Socket]: Rejected HdshkRes from {}, reason: test failed (c3).",
+										addr
 									);
 									continue;
 								}
@@ -1161,7 +1133,7 @@ impl SecureSocket {
 								peer.set_peer_id(Some(peer_id));
 								drop(peer);
 								drop(peers);
-								println!("[SS-{}][Connection]: Accepted from {}.", mode, addr);
+								println!("[Socket]: Accepted connection with {}.", addr);
 								on_connect(&socket, peer_id);
 							},
 							Some(packet_ty) => {
@@ -1169,18 +1141,18 @@ impl SecureSocket {
 									PacketType::EncHdshkRes =>
 										if mode != Mode::Client {
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: not operating as \
-												 client.",
-												mode, packet_ty, addr
+												"[Socket]: Rejected EncHdshkRes from {}, reason: unexpected \
+												 packet type.",
+												addr
 											);
 											continue;
 										},
 									PacketType::EncHdshkReq =>
 										if mode != Mode::Server {
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: not operating as \
-												 server.",
-												mode, packet_ty, addr
+												"[Socket]: Rejected EncHdshkReq from {}, reason: unexpected \
+												 packet type.",
+												addr
 											);
 											continue;
 										},
@@ -1189,8 +1161,8 @@ impl SecureSocket {
 
 								if len < 137 {
 									println!(
-										"[SS-{}][{}]: Rejected packet from {}, reason: truncated (C1).",
-										mode, packet_ty, addr
+										"[Socket]: Rejected {} from {}, reason: packet is trucated (c1).",
+										packet_ty, addr
 									);
 									continue;
 								}
@@ -1202,8 +1174,8 @@ impl SecureSocket {
 								// Preliminary check to make sure the peer is known before doing anything.
 								if !socket.keys.is_host_trusted(peer_id) {
 									println!(
-										"[SS-{}][{}]: Rejected packet from {}, reason: unknown peer.",
-										mode, packet_ty, addr
+										"[Socket]: Rejected {} from {}, reason: peer unknown.",
+										packet_ty, addr
 									);
 								}
 
@@ -1218,8 +1190,8 @@ impl SecureSocket {
 									Some(some) => some,
 									None => {
 										println!(
-											"[SS-{}][{}]: Rejected packet from {}, reason: no active connection.",
-											mode, packet_ty, addr
+											"[Socket]: Rejected {} from {}, reason: no active conection.",
+											packet_ty, addr
 										);
 										continue;
 									},
@@ -1227,16 +1199,16 @@ impl SecureSocket {
 
 								if peer.addr != addr {
 									println!(
-										"[SS-{}][{}]: Rejected packet from {}, reason: address mismatch.",
-										mode, packet_ty, addr
+										"[Socket]: Rejected {} from {}, reason: address mismatch.",
+										packet_ty, addr
 									);
 									continue;
 								}
 
 								if mode == Mode::Client && Some(peer_id) != peer.cur_peer_id() {
 									println!(
-										"[SS-{}][{}]: Rejected packet from {}, reason: host id mismatch.",
-										mode, packet_ty, addr
+										"[Socket]: Rejected {} from {}, reason: host mismatch.",
+										packet_ty, addr
 									);
 									continue;
 								}
@@ -1245,8 +1217,8 @@ impl SecureSocket {
 									Some(some) => some,
 									None => {
 										println!(
-											"[SS-{}][{}]: Rejected packet from {}, reason: old/invalid handshake.",
-											mode, packet_ty, addr
+											"[Socket]: Rejected {} from {}, reason: invalid handshake.",
+											packet_ty, addr
 										);
 										continue;
 									},
@@ -1258,11 +1230,10 @@ impl SecureSocket {
 									packet_ty == PacketType::Message,
 								) {
 									Ok(ok) => ok,
-									Err(e) => {
+									Err(_) => {
 										println!(
-											"[SS-{}][{}]: Rejected packet from {}, reason: decryption failed: \
-											 {:?}",
-											mode, packet_ty, addr, e
+											"[Socket]: Rejected {} from {}, reason: decryption failed.",
+											packet_ty, addr
 										);
 										continue;
 									},
@@ -1274,8 +1245,8 @@ impl SecureSocket {
 
 										if signature_end + 64 > message.len() {
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: truncated (C2).",
-												mode, packet_ty, addr
+												"[Socket]: Rejected {} from {}, reason: packet is truncated (c2).",
+												packet_ty, addr
 											);
 											continue;
 										}
@@ -1287,9 +1258,8 @@ impl SecureSocket {
 											socket.keys.verify_message(peer_id, signature_bytes, signed_message)
 										{
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: unable to verify: \
-												 {}",
-												mode, packet_ty, addr, e
+												"[Socket]: Rejected {} from {}, reason: verification failed: {}",
+												packet_ty, addr, e
 											);
 											continue;
 										}
@@ -1300,8 +1270,8 @@ impl SecureSocket {
 
 										if public_end > signed_message.len() {
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: truncated (C3).",
-												mode, packet_ty, addr
+												"[Socket]: Rejected {} from {}, reason: packet is truncated (c3).",
+												packet_ty, addr
 											);
 											continue;
 										}
@@ -1311,9 +1281,9 @@ impl SecureSocket {
 												Ok(ok) => ok,
 												Err(_) => {
 													println!(
-														"[SS-{}][{}]: Rejected packet from {}, reason: invalid \
-														 public key.",
-														mode, packet_ty, addr
+														"[Socket]: Rejected {} from {}, reason: invalid public \
+														 key.",
+														packet_ty, addr
 													);
 													continue;
 												},
@@ -1340,11 +1310,10 @@ impl SecureSocket {
 										let mut res_enc_test_msg =
 											match new_crypto.encrypt(res_test_msg, false, false) {
 												Ok((_, ok)) => ok,
-												Err(_) => {
+												Err(e) => {
 													println!(
-														"[SS-{}][{}]: Failed to send response to {}, reason: \
-														 encryption failed.",
-														mode, packet_ty, addr
+														"[Socket]: Failed to send {} to {}, reason: {}.",
+														packet_ty, addr, e
 													);
 													continue;
 												},
@@ -1372,36 +1341,25 @@ impl SecureSocket {
 											PacketType::EncHdshkRes,
 											res_message,
 										) {
-											match e {
-												SSError::Encrypt => {
-													println!(
-														"[SS-{}][{}]: Failed to send response to {}, reason: \
-														 encryption failed.",
-														mode, packet_ty, addr
-													);
-												},
-												SSError::Send(kind) => {
-													println!(
-														"[SS-{}][{}]: Failed to send response to {}, reason: {}",
-														mode, packet_ty, addr, kind
-													);
-												},
-												_ => unreachable!(),
-											}
+											println!(
+												"[Socket]: Failed to send {} to {}, reason: {}.",
+												packet_ty, addr, e
+											);
+											continue;
 										}
 
 										drop(crypto);
 										peer.crypto.retain(|id, _| *id == hdshk_id);
 										peer.crypto.insert(new_hdshk_id, new_crypto);
-										println!("[SS-{}][Connection]: Renegotiated with {}.", mode, addr);
+										println!("[Socket]: Renegotiated connection with: {}.", addr);
 									},
 									PacketType::EncHdshkRes => {
 										let signature_end = message[0] as usize;
 
 										if signature_end + 17 > message.len() {
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: truncated (C2).",
-												mode, packet_ty, addr
+												"[Socket]: Rejected {} from {}, reason: packet is truncated (c2).",
+												packet_ty, addr
 											);
 											continue;
 										}
@@ -1410,8 +1368,8 @@ impl SecureSocket {
 											!= message[signature_end + 16] as usize + signature_end + 80
 										{
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: truncated (C3).",
-												mode, packet_ty, addr
+												"[Socket]: Rejected {} from {}, reason: packet is truncated (c3).",
+												packet_ty, addr
 											);
 											continue;
 										}
@@ -1423,9 +1381,8 @@ impl SecureSocket {
 											socket.keys.verify_message(peer_id, signature_bytes, signed_message)
 										{
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: unable to verify: \
-												 {}",
-												mode, packet_ty, addr, e
+												"[Socket]: Rejected {} from {}, reason: verification failed: {}",
+												packet_ty, addr, e
 											);
 											continue;
 										}
@@ -1439,9 +1396,9 @@ impl SecureSocket {
 												Ok(ok) => ok,
 												Err(_) => {
 													println!(
-														"[SS-{}][{}]: Rejected packet from {}, reason: invalid \
-														 public key.",
-														mode, packet_ty, addr
+														"[Socket]: Rejected {} from {}, reason: invalid public \
+														 key.",
+														packet_ty, addr
 													);
 													continue;
 												},
@@ -1455,9 +1412,8 @@ impl SecureSocket {
 											Some(some) => some,
 											None => {
 												println!(
-													"[SS-{}][{}]: Rejected packet from {}, reason: unknown \
-													 handshake (C2).",
-													mode, packet_ty, addr
+													"[Socket]: Rejected {} from {}, reason: invalid handshake.",
+													packet_ty, addr
 												);
 												continue;
 											},
@@ -1476,9 +1432,8 @@ impl SecureSocket {
 											Ok(ok) => ok,
 											Err(_) => {
 												println!(
-													"[SS-{}][{}]: Rejected packet from {}, reason: test failed \
-													 (C1).",
-													mode, packet_ty, addr
+													"[Socket]: Rejected {} from {}, reason: test failed (c1).",
+													packet_ty, addr
 												);
 												continue;
 											},
@@ -1487,8 +1442,8 @@ impl SecureSocket {
 										if hash(&test_msg[32..]) != <[u8; 32]>::try_from(&test_msg[0..32]).unwrap()
 										{
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: test failed (C2).",
-												mode, packet_ty, addr
+												"[Socket]: Rejected {} from {}, reason: test failed (c2).",
+												packet_ty, addr
 											);
 											continue;
 										}
@@ -1497,14 +1452,14 @@ impl SecureSocket {
 										peer.crypto.insert(new_hdshk_id, new_crypto);
 										peer.set_ping_sent();
 										peer.set_ping_recv();
-										println!("[SS-{}][Connection]: Renegotiated with {}.", mode, addr);
+										println!("[Socket]: Renegotiated connection with: {}.", addr);
 									},
 									PacketType::Ping => {
 										if hash(&message[32..64]) != <[u8; 32]>::try_from(&message[0..32]).unwrap()
 										{
 											println!(
-												"[SS-{}][{}]: Rejected packet from {}, reason: hash mismatch.",
-												mode, packet_ty, addr
+												"[Socket]: Rejected {} from {}, reason: test failed.",
+												packet_ty, addr
 											);
 											continue;
 										}
@@ -1524,24 +1479,10 @@ impl SecureSocket {
 													PacketType::Ping,
 													send_msg,
 												) {
-													match e {
-														SSError::Encrypt => {
-															println!(
-																"[SS-{}][{}]: Failed to send ping to {}, reason: \
-																 encryption failed.",
-																mode, packet_ty, peer.addr
-															);
-														},
-														SSError::Send(kind) => {
-															println!(
-																"[SS-{}][{}]: Failed to send ping to {}, reason: \
-																 {}",
-																mode, packet_ty, peer.addr, kind
-															);
-														},
-														_ => unreachable!(),
-													}
-
+													println!(
+														"[Socket]: Failed to send {} to {}, reason: {}.",
+														packet_ty, addr, e
+													);
 													continue;
 												}
 
@@ -1549,10 +1490,8 @@ impl SecureSocket {
 											},
 											Mode::Client => {
 												println!(
-													"[SS-{}][Connection]: {} ms ping to {}.",
-													mode,
-													peer.last_ping_sent().elapsed().as_micros() as f32 / 1000.0,
-													peer.addr
+													"[Socket]: Ping to host {} ms.",
+													peer.last_ping_sent().elapsed().as_micros() as f32 / 1000.0
 												);
 												peer.set_ping_recv();
 											},
@@ -1567,10 +1506,7 @@ impl SecureSocket {
 								}
 							},
 							None =>
-								println!(
-									"[SS-{}]: Rejected packet from {}, reason: invalid packet type.",
-									mode, addr
-								),
+								println!("[Socket]: Rejected packet from {}, reason: invalid packet type.", addr),
 						}
 					},
 					Err(e) =>
@@ -1578,8 +1514,7 @@ impl SecureSocket {
 							io::ErrorKind::TimedOut => (),
 							io::ErrorKind::WouldBlock => (),
 							io::ErrorKind::ConnectionReset => (),
-							_ =>
-								println!("[SS-{}][Connection]: Failed to receive from socket: {}", mode, e.kind()),
+							_ => println!("[Socket]: Failed to receive packet, reason: {}.", e.kind()),
 						},
 				}
 			}
