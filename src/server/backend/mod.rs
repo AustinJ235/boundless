@@ -18,10 +18,10 @@ pub trait AudioEndpoint {
 	fn stream_info(&self) -> (u8, u32);
 }
 
-pub fn new_input_source(server_wk: Weak<Worm<Server>>) -> Result<Box<dyn InputSource + Send + Sync>, String> {
+pub fn new_input_source(_server_wk: Weak<Worm<Server>>) -> Result<Box<dyn InputSource + Send + Sync>, String> {
 	#[cfg(target_os = "windows")]
 	{
-		Win32Input::new(server_wk)
+		Win32Input::new(_server_wk)
 	}
 	#[cfg(not(target_os = "windows"))]
 	{

@@ -10,7 +10,6 @@ categories = ["command-line-utilities", "multimedia::audio"]
 keywords = ["keyboard", "mouse", "audio", "kvm"]
 
 [dependencies]
-atomicring = "1.2.9"
 parking_lot = "0.12.0"
 strum = { version = "0.24", features = ["derive"] }
 k256 = { version = "0.10.4", features = ["ecdh", "ecdsa"] }
