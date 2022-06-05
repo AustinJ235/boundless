@@ -8,8 +8,6 @@ use crate::worm::Worm;
 use parking_lot::{Condvar, Mutex};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub struct Server {
@@ -17,7 +15,6 @@ pub struct Server {
 	input_source: Box<dyn InputSource + Send + Sync>,
 	audio_endpoint: Option<Box<dyn AudioEndpoint + Send + Sync>>,
 	client_id: Worm<HostID>,
-	input_snd_h: JoinHandle<()>,
 	error: Mutex<Option<String>>,
 	error_cond: Condvar,
 }
@@ -26,7 +23,8 @@ impl Server {
 	pub fn new(listen_addr: SocketAddr, audio_enable: bool) -> Result<Arc<Worm<Self>>, String> {
 		let server: Arc<Worm<Server>> = Arc::new(Worm::new());
 		let host_keys = HostKeys::load()?;
-		let input_source = new_input_source().map_err(|e| format!("Failed to initialize input source: {}", e))?;
+		let input_source = new_input_source(Arc::downgrade(&server))
+			.map_err(|e| format!("Failed to initialize input source: {}", e))?;
 
 		let audio_endpoint = match audio_enable {
 			true => Some(new_audio_endpoint().map_err(|e| format!("Failed to initialize audio endpoint: {}", e))?),
@@ -71,54 +69,12 @@ impl Server {
 
 		let socket = SecureSocket::listen(host_keys, listen_addr, on_receive, on_connect, on_disconnect)
 			.map_err(|e| format!("Failed to create socket: {:?}", e))?;
-		let server_wk = Arc::downgrade(&server);
-
-		let input_snd_h = thread::spawn(move || {
-			match server_wk.upgrade() {
-				Some(server_worm) =>
-					match server_worm.wait_for_write_timeout(Duration::from_millis(500)) {
-						Ok(_) => (),
-						Err(_) => {
-							println!("[Input-Send]: Timed out waiting for server to initialize, exiting.");
-							return;
-						},
-					},
-				None => {
-					println!("[Input-Send]: Server has been dropped, exiting.");
-					return;
-				},
-			}
-
-			loop {
-				match server_wk.upgrade() {
-					Some(server) =>
-						match server.read().input_source.next_message(Some(Duration::from_millis(250))) {
-							Ok(ok) =>
-								match ok {
-									Some(some) => {
-										server.send_message(some);
-									},
-									None => (),
-								},
-							Err(e) => {
-								println!("[Input-Send]: Failed to receive message: {}, exiting.", e);
-								return;
-							},
-						},
-					None => {
-						println!("[Input-Send]: Server has been dropped, exiting.");
-						return;
-					},
-				}
-			}
-		});
 
 		server.write(Server {
 			socket,
 			input_source,
 			audio_endpoint,
 			client_id: Worm::new(),
-			input_snd_h,
 			error: Mutex::new(None),
 			error_cond: Condvar::new(),
 		});
@@ -174,7 +130,7 @@ impl Server {
 			Ok(client_id) =>
 				match self.socket.send_to(message.encode(), client_id.clone()) {
 					Ok(_) => true,
-					Err(_) => false, // TODO: check if server should disconnect client?
+					Err(_) => false,
 				},
 			Err(_) => false,
 		}
@@ -189,17 +145,12 @@ impl Server {
 		let mut error_gu = self.error.lock();
 
 		while error_gu.is_none() {
-			if self.input_snd_h.is_finished() {
-				*error_gu = Some(String::from("input receiving thread has exited"));
-			} else {
-				self.error_cond.wait(&mut error_gu);
+			if let Err(e) = self.input_source.check_status() {
+				*error_gu = Some(format!("input {}", e));
+				break;
 			}
-		}
 
-		self.input_source.exit();
-
-		if let Some(audio_endpoint) = self.audio_endpoint.as_ref() {
-			audio_endpoint.exit();
+			self.error_cond.wait_for(&mut error_gu, Duration::from_secs(1));
 		}
 
 		let ret = Err(error_gu.take().unwrap());

@@ -1,11 +1,10 @@
 use crate::message::Message;
 use crate::server::backend::AudioEndpoint;
-use atomicring::AtomicRingQueue;
+use flume::{RecvTimeoutError, Sender, TryRecvError, TrySendError};
 use parking_lot::{Condvar, Mutex};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -21,25 +20,22 @@ thread_local! {
 	static COM_INIT: RefCell<bool> = RefCell::new(false);
 }
 
+#[allow(dead_code)]
 pub struct WASAPIPlayback {
-	audio_chunks: Arc<AtomicRingQueue<Vec<f32>>>,
-	thrd_handle: JoinHandle<Result<(), String>>,
+	send_queue: Sender<Vec<f32>>,
+	thrd_h: JoinHandle<()>,
 	stream_info: (u8, u32),
-	exit: Arc<AtomicBool>,
 }
 
 impl WASAPIPlayback {
 	pub fn new() -> Result<Box<dyn AudioEndpoint + Send + Sync>, String> {
-		let audio_chunks = Arc::new(AtomicRingQueue::with_capacity(100));
-		let thrd_audio_chunks = audio_chunks.clone();
+		let (send_queue, recv_queue): (Sender<Vec<f32>>, _) = flume::bounded(2);
 		let init_res: Arc<Mutex<Option<Result<(u8, u32), String>>>> = Arc::new(Mutex::new(None));
 		let init_cond: Arc<Condvar> = Arc::new(Condvar::new());
 		let thrd_init_res = init_res.clone();
 		let thrd_init_cond = init_cond.clone();
-		let exit = Arc::new(AtomicBool::new(false));
-		let thrd_exit = exit.clone();
 
-		let thrd_handle: JoinHandle<Result<(), String>> = thread::spawn(move || unsafe {
+		let thrd_h = thread::spawn(move || unsafe {
 			if let Err(e) = COM_INIT.with(|com_init_ref| -> Result<(), String> {
 				let mut com_init = com_init_ref.borrow_mut();
 
@@ -57,7 +53,7 @@ impl WASAPIPlayback {
 			}) {
 				*thrd_init_res.lock() = Some(Err(format!("CoInitializeEx(): {}", e)));
 				thrd_init_cond.notify_one();
-				return Ok(());
+				return;
 			}
 
 			let devices: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
@@ -65,7 +61,7 @@ impl WASAPIPlayback {
 				Err(e) => {
 					*thrd_init_res.lock() = Some(Err(format!("CoCreateInstance(): {:?}", e)));
 					thrd_init_cond.notify_one();
-					return Ok(());
+					return;
 				},
 			};
 
@@ -75,7 +71,7 @@ impl WASAPIPlayback {
 					*thrd_init_res.lock() =
 						Some(Err(format!("IMMDeviceEnumerator::GetDefaultAudioEndpoint(): {:?}", e)));
 					thrd_init_cond.notify_one();
-					return Ok(());
+					return;
 				},
 			};
 
@@ -89,7 +85,7 @@ impl WASAPIPlayback {
 			) {
 				*thrd_init_res.lock() = Some(Err(format!("IMMDevice::Activate(): {:?}", e)));
 				thrd_init_cond.notify_one();
-				return Ok(());
+				return;
 			}
 
 			let audio_client = mbu_audio_client.assume_init();
@@ -98,7 +94,7 @@ impl WASAPIPlayback {
 				Err(e) => {
 					*thrd_init_res.lock() = Some(Err(format!("IAudioClient::GetMixFormat(): {:?}", e)));
 					thrd_init_cond.notify_one();
-					return Ok(());
+					return;
 				},
 			};
 
@@ -106,19 +102,16 @@ impl WASAPIPlayback {
 				nChannels,
 				nSamplesPerSec,
 				nBlockAlign,
-				// wFormatTag,
-				// nAvgBytesPerSec,
-				// wBitsPerSample,
-				// cbSize,
 				..
 			} = ptr::read_unaligned(p_mix_format);
 
 			if let Err(e) =
-				audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 300000, 0, p_mix_format, ptr::null())
+				audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 300_000, 0, p_mix_format, ptr::null())
+			// 30 ms
 			{
 				*thrd_init_res.lock() = Some(Err(format!("IAudioClient::Initialize(): {:?}", e)));
 				thrd_init_cond.notify_one();
-				return Ok(());
+				return;
 			}
 
 			let ac_buffer_size = match audio_client.GetBufferSize() {
@@ -126,7 +119,7 @@ impl WASAPIPlayback {
 				Err(e) => {
 					*thrd_init_res.lock() = Some(Err(format!("IAudioClient::GetBufferSize(): {:?}", e)));
 					thrd_init_cond.notify_one();
-					return Ok(());
+					return;
 				},
 			};
 
@@ -137,7 +130,7 @@ impl WASAPIPlayback {
 			{
 				*thrd_init_res.lock() = Some(Err(format!("IAudioClient::GetService(): {:?}", e)));
 				thrd_init_cond.notify_one();
-				return Ok(());
+				return;
 			}
 
 			*thrd_init_res.lock() = Some(Ok((nChannels as _, nSamplesPerSec as _)));
@@ -147,22 +140,22 @@ impl WASAPIPlayback {
 
 			let mut pending_samples: VecDeque<f32> =
 				VecDeque::with_capacity(ac_buffer_size as usize * nChannels as usize);
-			let zero_threshold = ac_buffer_size / 4;
-			let block_duration = Duration::from_micros(
-				(((ac_buffer_size / 4) as f64 / nSamplesPerSec as f64) * 1000000.0).trunc() as u64,
-			);
+			let block_duration = Duration::from_millis(15);
+			// number of frames consumed during block
+			let zero_threshold = (nSamplesPerSec as f32 * (15.0 / 1000.0)).ceil() as u32;
 
 			loop {
-				if thrd_exit.load(atomic::Ordering::SeqCst) {
-					return Ok(());
-				}
+				let padding = match audio_client.GetCurrentPadding() {
+					Ok(ok) => ok,
+					Err(e) => {
+						println!("[Audio]: IAudioClient::GetCurrentPadding(): {:?}", e);
+						return;
+					},
+				};
 
-				let padding = audio_client
-					.GetCurrentPadding()
-					.map_err(|e| format!("IAudioClient::GetCurrentPadding(): {:?}", e))?;
 				let available_size = ac_buffer_size - padding;
-
 				let buffer_samples_available = available_size as usize * nChannels as usize;
+
 				let samples_required_before_block = if padding < zero_threshold {
 					(zero_threshold - padding) as usize
 				} else {
@@ -170,12 +163,10 @@ impl WASAPIPlayback {
 				};
 
 				while pending_samples.len() < buffer_samples_available {
-					match thrd_audio_chunks.try_pop() {
-						Some(chunk) =>
-							for sample in chunk {
-								pending_samples.push_back(sample);
-							},
-						None => break,
+					match recv_queue.try_recv() {
+						Ok(chunk) => chunk.into_iter().for_each(|s| pending_samples.push_back(s)),
+						Err(TryRecvError::Empty) => break,
+						Err(TryRecvError::Disconnected) => return,
 					}
 				}
 
@@ -203,9 +194,15 @@ impl WASAPIPlayback {
 					}
 
 					let frames_to_write = write_samples_count as u32 / nChannels as u32;
-					let p_buffer = render_client
-						.GetBuffer(frames_to_write)
-						.map_err(|e| format!("IAudioRenderClient::GetBuffer(): {:?}", e))?;
+
+					let p_buffer = match render_client.GetBuffer(frames_to_write) {
+						Ok(ok) => ok,
+						Err(e) => {
+							println!("[Audio]: IAudioRenderClient::GetBuffer(): {:?}", e);
+							return;
+						},
+					};
+
 					let buffer_bytes =
 						slice::from_raw_parts_mut(p_buffer, frames_to_write as usize * nBlockAlign as usize);
 
@@ -218,20 +215,25 @@ impl WASAPIPlayback {
 						}
 					}
 
-					render_client
-						.ReleaseBuffer(frames_to_write, 0)
-						.map_err(|e| format!("IAudioRenderClient::ReleaseBuffer(): {:?}", e))?;
+					if let Err(e) = render_client.ReleaseBuffer(frames_to_write, 0) {
+						println!("[Audio]: IAudioRenderClient::ReleaseBuffer(): {:?}", e);
+						return;
+					}
 
 					if !has_started {
-						audio_client.Start().map_err(|e| format!("IAudioClient::Start(): {:?}", e))?;
+						if let Err(e) = audio_client.Start() {
+							println!("[Audio]: IAudioClient::Start(): {:?}", e);
+							return;
+						}
+
 						has_started = true;
 					}
 				}
 
-				if let Some(chunk) = thrd_audio_chunks.pop_for(block_duration.clone()) {
-					for sample in chunk {
-						pending_samples.push_back(sample);
-					}
+				match recv_queue.recv_timeout(block_duration.clone()) {
+					Ok(chunk) => chunk.into_iter().for_each(|s| pending_samples.push_back(s)),
+					Err(RecvTimeoutError::Timeout) => (),
+					Err(RecvTimeoutError::Disconnected) => return,
 				}
 			}
 		});
@@ -245,47 +247,48 @@ impl WASAPIPlayback {
 		let stream_info = init_res_guard.take().unwrap()?;
 
 		Ok(Box::new(Self {
-			audio_chunks,
+			send_queue,
 			stream_info,
-			thrd_handle,
-			exit,
+			thrd_h,
 		}))
 	}
 }
 
 impl AudioEndpoint for WASAPIPlayback {
-	// TODO: join thread and get error
 	fn send_message(&self, message: Message) -> Result<(), String> {
-		if self.thrd_handle.is_finished() {
-			return Err(format!("thread has exited"));
-		}
-
 		match message {
 			Message::AudioChunk {
 				data,
 				channels,
 				sample_rate,
 			} =>
-				if self.stream_info.0 != channels || self.stream_info.1 != sample_rate {
+				if self.stream_info.0 != channels {
 					println!(
-						"[Audio]: Can't play back incoming audio. Receiving {} channels at {} hz, expecting {} \
-						 channels at {} hz.",
-						channels, sample_rate, self.stream_info.0, self.stream_info.1
+						"[Audio]: Rejected audio chunk, reason: expected {} channels, but recv'd {} channels.",
+						self.stream_info.0, channels
 					);
+					Ok(())
+				} else if self.stream_info.1 != sample_rate {
+					println!(
+						"[Audio]: Rejected audio chunk, reason: expected sample rate of {} Hz, but recv'd {} Hz.",
+						self.stream_info.1, sample_rate
+					);
+					Ok(())
 				} else {
-					self.audio_chunks.push_overwrite(data);
+					match self.send_queue.try_send(data) {
+						Ok(_) => Ok(()),
+						Err(TrySendError::Full(_)) => {
+							println!("[Audio]: Rejected audio chunk, reason: queue is full.");
+							Ok(())
+						},
+						Err(TrySendError::Disconnected(_)) => Err(String::from("playback thread has exited.")),
+					}
 				},
-			_ => (),
+			_ => unreachable!(),
 		}
-
-		Ok(())
 	}
 
 	fn stream_info(&self) -> (u8, u32) {
 		self.stream_info
-	}
-
-	fn exit(&self) {
-		self.exit.store(true, atomic::Ordering::SeqCst);
 	}
 }

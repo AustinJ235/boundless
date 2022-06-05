@@ -1,10 +1,12 @@
 use crate::message::Message;
 use crate::server::backend::InputSource;
+use crate::server::Server;
+use crate::worm::Worm;
 use crate::{KBKey, MSButton};
 use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{self, AtomicBool, AtomicIsize};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -41,6 +43,22 @@ const WINPROC_CLASS_NAME: &'static U16CStr = u16cstr!("Boundless Raw Input");
 static PASS_EVENTS: AtomicBool = AtomicBool::new(true);
 static HOOK_MOUSE_LL: AtomicIsize = AtomicIsize::new(0);
 static HOOK_KEYBOARD_LL: AtomicIsize = AtomicIsize::new(0);
+static SERVER_OP: Mutex<Option<Weak<Worm<Server>>>> = Mutex::new(None);
+
+fn send_message(msg: Message) -> Result<bool, String> {
+	match SERVER_OP.lock().as_ref() {
+		Some(weak) =>
+			match weak.upgrade() {
+				Some(worm) =>
+					match worm.try_read() {
+						Ok(server) => Ok(server.send_message(msg)),
+						Err(_) => Err(String::from("server not intialized")),
+					},
+				None => Err(String::from("server has been dropped")),
+			},
+		None => Err(String::from("server not set")),
+	}
+}
 
 lazy_static! {
 	static ref EVENT_QUEUE: AtomicRingQueue<Message> = AtomicRingQueue::with_capacity(1000);
@@ -72,10 +90,14 @@ unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARA
 
 		if !PASS_EVENTS.load(atomic::Ordering::SeqCst) {
 			if let Some(event) = event_op {
-				event_queue_push(event);
+				if send_message(event).unwrap_or(false) {
+					return LRESULT(1);
+				} else {
+					PASS_EVENTS.store(true, atomic::Ordering::SeqCst);
+				}
+			} else {
+				return LRESULT(1);
 			}
-
-			return LRESULT(1);
 		}
 	}
 
@@ -205,21 +227,15 @@ unsafe extern "system" fn keyboard_ll_hook(code: i32, wparam: WPARAM, lparam: LP
 
 			if event == Message::KBRelease(KBKey::RightControl) {
 				PASS_EVENTS.store(!pass_events, atomic::Ordering::SeqCst);
-
-				/*
-				if pass_events {
-					event_queue_push(Message::CaptureStart);
-				} else {
-					event_queue_push(Message::CaptureEnd);
-				}
-				*/
-
 				return LRESULT(1);
 			}
 
 			if !pass_events {
-				event_queue_push(event);
-				return LRESULT(1);
+				if send_message(event).unwrap_or(false) {
+					return LRESULT(1);
+				} else {
+					PASS_EVENTS.store(true, atomic::Ordering::SeqCst);
+				}
 			}
 		}
 	}
@@ -233,17 +249,14 @@ unsafe extern "system" fn wnd_proc_callback(window: HWND, msg: u32, wparam: WPAR
 
 pub struct Win32Input {
 	thrd_h: Mutex<Option<JoinHandle<Result<(), String>>>>,
-	exit: Arc<AtomicBool>,
 }
 
 impl Win32Input {
-	pub fn new() -> Result<Box<dyn InputSource + Send + Sync>, String> {
+	pub fn new(server_wk: Weak<Worm<Server>>) -> Result<Box<dyn InputSource + Send + Sync>, String> {
 		let startup_result: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
 		let startup_result_ready = Arc::new(Condvar::new());
 		let thread_result = startup_result.clone();
 		let thread_result_ready = startup_result_ready.clone();
-		let exit = Arc::new(AtomicBool::new(false));
-		let thrd_exit = exit.clone();
 
 		let thrd_h = thread::spawn(move || unsafe {
 			let target_win_class = WNDCLASSEXW {
@@ -254,7 +267,7 @@ impl Win32Input {
 				cbWndExtra: 0,
 				hInstance: GetModuleHandleW(PCWSTR::default()),
 				hIcon: HICON(0),
-				hCursor: HCURSOR(0), // must be null in order for cursor state to work properly
+				hCursor: HCURSOR(0),
 				hbrBackground: HBRUSH(0),
 				lpszMenuName: PCWSTR::default(),
 				lpszClassName: PCWSTR(WINPROC_CLASS_NAME.as_ptr()),
@@ -277,8 +290,6 @@ impl Win32Input {
 				GetModuleHandleW(PCWSTR::default()),
 				std::ptr::null(),
 			);
-
-			// SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_VISIBLE | WS_POPUP).0 as isize);
 
 			if hwnd.0 == 0 {
 				*thread_result.lock() = Some(Err(String::from("Failed to create event target window.")));
@@ -354,14 +365,28 @@ impl Win32Input {
 
 			*thread_result.lock() = Some(Ok(()));
 			thread_result_ready.notify_one();
+
+			match server_wk.upgrade() {
+				Some(worm) =>
+					match worm.blocking_read_timeout(Duration::from_millis(500)) {
+						Ok(_) => *SERVER_OP.lock() = Some(server_wk.clone()),
+						Err(_) => {
+							UnhookWindowsHookEx(hook_mouse_ll);
+							UnhookWindowsHookEx(hook_keyboard_ll);
+							return Ok(());
+						},
+					},
+				None => {
+					UnhookWindowsHookEx(hook_mouse_ll);
+					UnhookWindowsHookEx(hook_keyboard_ll);
+					return Ok(());
+				},
+			}
+
 			let mut message = MSG::default();
-			let mut error_op = None;
+			let error_op;
 
 			loop {
-				if thrd_exit.load(atomic::Ordering::SeqCst) {
-					break;
-				}
-
 				match GetMessageW(&mut message, HWND::default(), 0, 0).ok() {
 					Ok(_) =>
 						match message.message {
@@ -391,10 +416,13 @@ impl Win32Input {
 											if mouse_data.usFlags as u32 | MOUSE_MOVE_RELATIVE
 												== MOUSE_MOVE_RELATIVE
 											{
-												event_queue_push(Message::MSMotion(
+												if let Err(e) = send_message(Message::MSMotion(
 													mouse_data.lLastX,
 													mouse_data.lLastY,
-												));
+												)) {
+													error_op = Some(e);
+													break;
+												}
 											}
 										},
 									ty => println!("Uknown raw input type: {:?}", ty),
@@ -430,61 +458,29 @@ impl Win32Input {
 
 		Ok(Box::new(Self {
 			thrd_h: Mutex::new(Some(thrd_h)),
-			exit,
 		}))
 	}
+}
 
-	fn check_thread(&self) -> Result<(), String> {
+impl InputSource for Win32Input {
+	fn check_status(&self) -> Result<(), String> {
 		let mut handle = self.thrd_h.lock();
 
 		if handle.is_none() {
-			return Err(String::from("thread has previously exited."));
+			return Err(String::from("thread has previously exited"));
 		}
 
 		if handle.as_ref().unwrap().is_finished() {
 			return match handle.take().unwrap().join() {
 				Ok(ok) =>
 					match ok {
-						Ok(_) => Err(String::from("thread has exited sucessfully.")),
+						Ok(_) => Err(String::from("thread has exited sucessfully")),
 						Err(e) => Err(format!("thread has exited with error: {}", e)),
 					},
-				Err(_) => Err(String::from("thread has panicked.")),
+				Err(_) => Err(String::from("thread has panicked")),
 			};
 		}
 
 		Ok(())
-	}
-}
-
-impl InputSource for Win32Input {
-	fn next_message(&self, timeout: Option<Duration>) -> Result<Option<Message>, String> {
-		match EVENT_QUEUE.try_pop() {
-			Some(some) => Ok(Some(some)),
-			None => {
-				self.check_thread()?;
-
-				match timeout {
-					Some(timeout) => Ok(EVENT_QUEUE.pop_for(timeout)),
-					None => Ok(Some(EVENT_QUEUE.pop())),
-				}
-			},
-		}
-	}
-
-	fn exit(&self) {
-		self.exit.store(true, atomic::Ordering::SeqCst);
-	}
-}
-
-fn event_queue_push(event: Message) {
-	let mut push_ev = event;
-
-	loop {
-		match EVENT_QUEUE.try_push(push_ev) {
-			Ok(_) => break,
-			Err(ret_ev) => push_ev = ret_ev,
-		}
-
-		std::hint::spin_loop();
 	}
 }
