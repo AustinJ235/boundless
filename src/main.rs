@@ -1,7 +1,3 @@
-#[cfg(target_os = "windows")]
-#[macro_use]
-extern crate lazy_static;
-
 pub mod client;
 pub mod host_keys;
 pub mod message;

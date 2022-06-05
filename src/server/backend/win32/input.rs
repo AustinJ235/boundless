@@ -3,7 +3,6 @@ use crate::server::backend::InputSource;
 use crate::server::Server;
 use crate::worm::Worm;
 use crate::{KBKey, MSButton};
-use atomicring::AtomicRingQueue;
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{self, AtomicBool, AtomicIsize};
 use std::sync::{Arc, Weak};
@@ -58,10 +57,6 @@ fn send_message(msg: Message) -> Result<bool, String> {
 			},
 		None => Err(String::from("server not set")),
 	}
-}
-
-lazy_static! {
-	static ref EVENT_QUEUE: AtomicRingQueue<Message> = AtomicRingQueue::with_capacity(1000);
 }
 
 unsafe extern "system" fn mouse_ll_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

@@ -31,7 +31,6 @@ libpulse-simple-binding = "2.25.0"
 [target.'cfg(windows)'.dependencies]
 widestring = "0.5.1"
 u16cstr = "0.3.0"
-lazy_static = "1.4.0"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.35.0"
