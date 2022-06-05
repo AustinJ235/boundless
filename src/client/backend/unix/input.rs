@@ -114,10 +114,6 @@ impl InputEndpoint for UInputEndpoint {
 			_ => Ok(()),
 		}
 	}
-
-	fn exit(&self) {
-		// normal dropping works
-	}
 }
 
 fn event_now(code: EventCode, value: i32) -> InputEvent {

@@ -5,23 +5,23 @@ use self::win32::audio::WASAPIPlayback;
 #[cfg(target_os = "windows")]
 use self::win32::input::Win32Input;
 use crate::message::Message;
-use std::time::Duration;
+use crate::server::Server;
+use crate::worm::Worm;
+use std::sync::Weak;
 
 pub trait InputSource {
-	fn next_message(&self, timeout: Option<Duration>) -> Result<Option<Message>, String>;
-	fn exit(&self);
+	fn check_status(&self) -> Result<(), String>;
 }
 
 pub trait AudioEndpoint {
 	fn send_message(&self, message: Message) -> Result<(), String>;
 	fn stream_info(&self) -> (u8, u32);
-	fn exit(&self);
 }
 
-pub fn new_input_source() -> Result<Box<dyn InputSource + Send + Sync>, String> {
+pub fn new_input_source(_server_wk: Weak<Worm<Server>>) -> Result<Box<dyn InputSource + Send + Sync>, String> {
 	#[cfg(target_os = "windows")]
 	{
-		Win32Input::new()
+		Win32Input::new(_server_wk)
 	}
 	#[cfg(not(target_os = "windows"))]
 	{

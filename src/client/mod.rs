@@ -7,19 +7,15 @@ use crate::socket::{OnConnectFn, OnDisconnectFn, OnReceiveFn, SecureSocket};
 use crate::worm::Worm;
 use parking_lot::{Condvar, Mutex};
 use std::net::SocketAddr;
-use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub struct Client {
 	socket: Arc<SecureSocket>,
 	input_endpoint: Box<dyn InputEndpoint + Send + Sync>,
 	audio_source: Option<Box<dyn AudioSource + Send + Sync>>,
-	audio_snd_h: Option<JoinHandle<()>>,
 	error: Mutex<Option<String>>,
 	error_cond: Condvar,
-	send_audio: AtomicBool,
 }
 
 impl Client {
@@ -30,7 +26,11 @@ impl Client {
 			new_input_endpoint().map_err(|e| format!("Failed to initialize input endpoint: {}", e))?;
 
 		let audio_source = match audio_enable {
-			true => Some(new_audio_source().map_err(|e| format!("Failed to initialize audio source: {}", e))?),
+			true =>
+				Some(
+					new_audio_source(Arc::downgrade(&client))
+						.map_err(|e| format!("Failed to initialize audio source: {}", e))?,
+				),
 			false => None,
 		};
 
@@ -72,47 +72,13 @@ impl Client {
 
 		let socket = SecureSocket::connect(host_keys, connect_to, on_receive, on_connect, on_disconnect)
 			.map_err(|e| format!("Failed to create socket: {:?}", e))?;
-		let client_wk = Arc::downgrade(&client);
-
-		let audio_snd_h = if audio_enable {
-			Some(thread::spawn(move || {
-				loop {
-					let worm = match client_wk.upgrade() {
-						Some(worm) => worm,
-						None => return,
-					};
-
-					let client = match worm.blocking_read_timeout(Duration::from_millis(500)) {
-						Ok(ok) => ok,
-						Err(_) => return,
-					};
-
-					match client.audio_source.as_ref().unwrap().next_message(Duration::from_millis(500)) {
-						Ok(message_op) =>
-							if let Some(message) = message_op {
-								if client.send_audio.load(atomic::Ordering::SeqCst) {
-									client.send_message(message);
-								}
-							},
-						Err(e) => {
-							client.signal_error(format!("Failed to receive audio: {}", e));
-							break;
-						},
-					}
-				}
-			}))
-		} else {
-			None
-		};
 
 		client.write(Client {
 			socket,
 			input_endpoint,
 			audio_source,
-			audio_snd_h,
 			error: Mutex::new(None),
 			error_cond: Condvar::new(),
-			send_audio: AtomicBool::new(false),
 		});
 
 		Ok(client)
@@ -125,7 +91,6 @@ impl Client {
 	}
 
 	fn on_disconnect(&self) {
-		self.send_audio.store(false, atomic::Ordering::SeqCst);
 		self.audio_source.as_ref().map(|audio_source| audio_source.set_stream_info(None));
 	}
 
@@ -140,8 +105,6 @@ impl Client {
 							Some(audio_source) =>
 								match audio {
 									Some(stream_info) => {
-										self.send_audio.store(true, atomic::Ordering::SeqCst);
-
 										if let Err(e) = audio_source.set_stream_info(Some(stream_info)) {
 											self.signal_error(format!(
 												"[Audio]: Failed to sent stream info: {}",
@@ -149,20 +112,15 @@ impl Client {
 											));
 										}
 									},
-									None => {
-										self.send_audio.store(false, atomic::Ordering::SeqCst);
-
+									None =>
 										if let Err(e) = audio_source.set_stream_info(None) {
 											self.signal_error(format!(
 												"[Audio]: Failed to sent stream info: {}",
 												e
 											));
-										}
-									},
+										},
 								},
-							None => {
-								self.send_audio.store(false, atomic::Ordering::SeqCst);
-							},
+							None => (),
 						},
 					message @ Message::AudioChunk {
 						..
@@ -196,21 +154,7 @@ impl Client {
 		let mut error_gu = self.error.lock();
 
 		while error_gu.is_none() {
-			match self.audio_snd_h.as_ref() {
-				Some(thrd_h) =>
-					if thrd_h.is_finished() {
-						*error_gu = Some(String::from("audio receiving thread has exited"));
-					} else {
-						self.error_cond.wait(&mut error_gu);
-					},
-				None => self.error_cond.wait(&mut error_gu),
-			}
-		}
-
-		self.input_endpoint.exit();
-
-		if let Some(audio_source) = self.audio_source.as_ref() {
-			audio_source.exit();
+			self.error_cond.wait(&mut error_gu);
 		}
 
 		let ret = Err(error_gu.take().unwrap());
